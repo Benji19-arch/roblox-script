@@ -9,7 +9,7 @@ local defaults = {
  Aim=true, Bots=true, TargetPlayers=true, TeamCheck=true, WallCheck=true,
  Sticky=true, ESP=true, Outline=true, Skeleton=true, Names=true, Health=true, Distance=true,
  Circle=true, Fov=160, Smooth=12, Range=1000, Part="Head",
- Activation="Maintenir", MaxESP=16, SkeletonFPS=20,
+ Activation="Maintenir", Tracking="Direct", MaxESP=16, SkeletonFPS=20,
 }
 local config = table.clone(defaults)
 local records, connections, refreshers = {}, {}, {}
@@ -93,6 +93,7 @@ end
 setting("Visee","Aim","Assistance a la visee")
 setting("Visee","Activation","Activation",{"Maintenir","Permanent"})
 setting("Visee","Part","Point vise",{"Head","HumanoidRootPart"})
+setting("Visee","Tracking","Suivi de la cible",{"Direct","Fluide"})
 setting("Visee","Fov","Rayon de selection",{60,100,160,240,320}," px")
 setting("Visee","Smooth","Reactivite (+ = rapide)",{4,8,12,20,32})
 setting("Visee","Sticky","Conserver la cible")
@@ -321,7 +322,9 @@ local function scan(camera)
   if not part or not part:IsA("BasePart") then continue end
   local distance=((root or part).Position-localRoot.Position).Magnitude
   if distance>config.Range then continue end
-  r.owner=owner; r.bot=bot; r.distance=distance; r.aimPart=part; r.eligible=true
+  r.owner=owner; r.bot=bot; r.distance=distance; r.displayPart=part; r.eligible=true
+  -- En mode Head, ne jamais remplacer silencieusement la tete par le torse.
+  r.aimPart=partOf(model,config.Part)
   r.head=partOf(model,"Head"); r.torso=partOf(model,"UpperTorso") or partOf(model,"Torso"); r.root=root
   table.insert(aimCandidates,r)
   if config.ESP then
@@ -342,7 +345,7 @@ local function scan(camera)
   visibilityCursor=visibilityCursor%#registryList+1
   local r=registryList[visibilityCursor]
   local inSight=false
-  for _,part in {r.head or r.aimPart,r.torso or r.aimPart,r.root or r.aimPart} do
+  for _,part in {r.head or r.displayPart,r.torso or r.displayPart,r.root or r.displayPart} do
    local p,onScreen=camera:WorldToViewportPoint(part.Position)
    if onScreen and p.Z>0 and clearTo(camera,r.model,part.Position) then inSight=true; break end
   end
@@ -352,7 +355,7 @@ local function scan(camera)
   local color=r.inSight and visibleColor or hiddenColor
   r.highlight.Enabled=config.Outline
   r.highlight.OutlineColor=color
-  r.info.Adornee=r.head or r.aimPart
+  r.info.Adornee=r.head or r.displayPart
   r.info.Enabled=config.Names or config.Health or config.Distance
   if r.info.Enabled then
    local lines={}
@@ -370,11 +373,20 @@ local function scan(camera)
  end
 end
 local shortlist={}
+local blockedSince,aimBlocked=nil,false
+local lastAimRotation,lastAimRecord,lastAimCamera=nil,nil,nil
 local function acquire(camera)
- if config.Sticky and screenScore(camera,locked) then
-  if not config.WallCheck or clearTo(camera,locked.model,locked.aimPart.Position) then return end
+ -- Le rayon sert a choisir une cible, pas a changer de personnage pendant le suivi.
+ if config.Sticky and valid(locked) then
+  if not config.WallCheck or clearTo(camera,locked.model,locked.aimPart.Position) then
+   blockedSince=nil; aimBlocked=false; return
+  end
+  -- Un obstacle tres bref ne provoque pas un saut vers une autre tete.
+  blockedSince=blockedSince or os.clock()
+  aimBlocked=true
+  if os.clock()-blockedSince<0.18 then return end
  end
- locked=nil
+ locked=nil; blockedSince=nil; aimBlocked=false
  table.clear(shortlist)
  for _,r in aimCandidates do
   local score=screenScore(camera,r)
@@ -412,7 +424,7 @@ connect(RunService.Heartbeat,function(dt)
  elseif not localHumanoid or localHumanoid.Health<=0 then setStatus("En attente de ton personnage vivant")
  elseif Input:GetFocusedTextBox() then setStatus("Ferme la saisie de texte pour viser")
  elseif not aiming then setStatus("Maintiens le clic droit / mode "..config.Activation)
- elseif locked then setStatus("Cible : "..locked.model.Name)
+ elseif locked then setStatus((aimBlocked and "Obstacle bref : " or "Cible : ")..locked.model.Name)
  else setStatus(selectionMessage) end
  stroke.Color=locked and visibleColor or accent
 end)
@@ -429,11 +441,33 @@ RunService:BindToRenderStep(binding,Enum.RenderPriority.Last.Value,function(dt)
   if aimClock>=AIM_INTERVAL then aimClock=0; acquire(camera) end
   if valid(locked) then
    local position=camera.CFrame.Position
-   if (locked.aimPart.Position-position).Magnitude>.001 then
-    camera.CFrame=camera.CFrame:Lerp(CFrame.lookAt(position,locked.aimPart.Position),1-math.exp(-config.Smooth*dt))
+   local targetPosition=locked.aimPart.Position
+   if (targetPosition-position).Magnitude>.001 then
+    local desired=CFrame.lookAt(position,targetPosition).Rotation
+    if lastAimRecord~=locked or lastAimCamera~=camera then
+     lastAimRotation=camera.CFrame.Rotation
+     lastAimRecord=locked; lastAimCamera=camera
+    end
+    if not aimBlocked then
+     if config.Tracking=="Direct" then
+      -- La tete est suivie a chaque image, sans retard de lissage.
+      lastAimRotation=desired
+     else
+      -- Partir de notre derniere rotation, pas de celle reinitialisee par la camera Roblox.
+      lastAimRotation=lastAimRotation:Lerp(desired,1-math.exp(-config.Smooth*math.min(dt,0.1)))
+      if lastAimRotation.LookVector:Dot(desired.LookVector)>0.999998 then lastAimRotation=desired end
+     end
+    end
+    -- Pendant une obstruction breve, conserver la direction sans suivre a travers le mur.
+    camera.CFrame=CFrame.new(position)*lastAimRotation
    end
-  else locked=nil end
- else locked=nil; aimClock=AIM_INTERVAL end
+  else
+   locked=nil; lastAimRotation=nil; lastAimRecord=nil
+  end
+ else
+  locked=nil; aimClock=AIM_INTERVAL; aimBlocked=false; blockedSince=nil
+  lastAimRotation=nil; lastAimRecord=nil; lastAimCamera=nil
+ end
  boneClock+=dt
  if boneClock>=1/config.SkeletonFPS then
   boneClock=0
