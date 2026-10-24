@@ -7,7 +7,7 @@ local Input = game:GetService("UserInputService")
 local player = Players.LocalPlayer
 local defaults = {
  Aim=true, Bots=true, TargetPlayers=true, TeamCheck=true, WallCheck=true,
- Sticky=true, ESP=true, Outline=true, Fill=false, Names=true, Health=true, Distance=true,
+ Sticky=true, ESP=true, Outline=true, Skeleton=true, Names=true, Health=true, Distance=true,
  Circle=true, Fov=160, Smooth=12, Range=1000, Part="Head",
 }
 local config = table.clone(defaults)
@@ -38,17 +38,20 @@ if old then
  if stop and stop:IsA("BindableEvent") then stop:Fire() else old:Destroy() end
 end
 local gui=make("ScreenGui",pg,{Name="StudioAimPanel",ResetOnSpawn=false,IgnoreGuiInset=true})
+gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
 local shutdown=make("BindableEvent",gui,{Name="Shutdown"})
 local circle=make("Frame",gui,{BackgroundTransparency=1,AnchorPoint=Vector2.new(.5,.5)})
 make("UICorner",circle,{CornerRadius=UDim.new(1,0)})
 local stroke=make("UIStroke",circle,{Color=accent,Thickness=1.5,Transparency=.25})
 local panel=make("Frame",gui,{Name="Panel",Position=UDim2.fromOffset(18,64),Size=UDim2.fromOffset(500,470),BackgroundColor3=bg,BorderSizePixel=0})
+panel.ZIndex=5
 round(panel)
 make("UIStroke",panel,{Color=card,Thickness=1})
 local scale=make("UIScale",panel,{Scale=1})
 label(panel,"STUDIO / ASSISTANCE",UDim2.fromOffset(18,14),UDim2.new(1,-36,0,28)).Font=Enum.Font.GothamBold
 label(panel,"Joueurs & PNJ - Reglages en temps reel",UDim2.fromOffset(18,42),UDim2.new(1,-36,0,22)).TextTransparency=.3
 local menu=make("TextButton",gui,{Name="Menu",Position=UDim2.fromOffset(18,18),Size=UDim2.fromOffset(140,34),Text="VISEE / MENU",BackgroundColor3=accent,TextColor3=bg,TextSize=12,Font=Enum.Font.GothamBold,BorderSizePixel=0})
+menu.ZIndex=6
 round(menu)
 connect(menu.Activated,function() panel.Visible=not panel.Visible; aiming=false; locked=nil end)
 local pages,buttons={},{}
@@ -96,7 +99,7 @@ setting("Cibles","TargetPlayers","Viser les joueurs")
 setting("Cibles","Bots","Viser les bots / PNJ")
 setting("Cibles","TeamCheck","Ignorer les allies")
 setting("Cibles","Range","Portee maximale",{150,300,600,1000,3000}," studs")
-for _,item in {{"ESP","Activer ESP"},{"Outline","Contour du personnage"},{"Fill","Remplissage leger"},{"Names","Noms et type"},{"Health","Points de vie"},{"Distance","Distance"},{"Circle","Cercle de visee"}} do setting("Affichage",item[1],item[2]) end
+for _,item in {{"ESP","Activer ESP"},{"Outline","Contour de silhouette"},{"Skeleton","Squelette"},{"Names","Noms et type"},{"Health","Points de vie"},{"Distance","Distance"},{"Circle","Cercle de visee"}} do setting("Affichage",item[1],item[2]) end
 local help=label(pages.Reglages,"Clic droit maintenu : viser\nInser ou MENU : afficher / masquer\n\nBots : modeles avec un Humanoid.\nPNJ allies : Friendly=true ou TeamName.\nVert : visible / Rouge : cache.\n\nClique sur les valeurs pour les changer.",UDim2.new(),UDim2.new(1,0,0,180))
 help.TextWrapped=true; help.TextYAlignment=Enum.TextYAlignment.Top
 local reset=make("TextButton",pages.Reglages,{Size=UDim2.new(1,0,0,40),Text="Retablir les reglages",BackgroundColor3=card,TextColor3=accent,TextSize=13,BorderSizePixel=0}); round(reset)
@@ -106,7 +109,7 @@ label(panel,"CLIC DROIT : VISER / INSER : MENU",UDim2.new(0,18,1,-28),UDim2.new(
 selectTab("Visee")
 local function remove(model)
  local r=records[model]; if not r then return end
- r.highlight:Destroy(); r.info:Destroy(); records[model]=nil
+ r.highlight:Destroy(); r.info:Destroy(); r.skeleton:Destroy(); records[model]=nil
  if locked==model then locked=nil end
 end
 local function add(obj)
@@ -116,7 +119,12 @@ local function add(obj)
  local h=make("Highlight",gui,{Adornee=model,Enabled=false,FillTransparency=1,OutlineTransparency=0,DepthMode=Enum.HighlightDepthMode.AlwaysOnTop})
  local info=make("BillboardGui",gui,{Size=UDim2.fromOffset(230,64),StudsOffsetWorldSpace=Vector3.new(0,3,0),AlwaysOnTop=true,Enabled=false})
  local t=label(info,"",UDim2.new(),UDim2.fromScale(1,1)); t.TextXAlignment=Enum.TextXAlignment.Center; t.TextStrokeTransparency=.25
- records[model]={humanoid=obj,highlight=h,info=info,text=t,lastCheck=0,inSight=false}
+ local skeleton=make("Frame",gui,{Name="Skeleton",Size=UDim2.fromScale(1,1),BackgroundTransparency=1,Visible=false,ZIndex=0})
+ local bones={}
+ for i=1,15 do
+  bones[i]=make("Frame",skeleton,{Name="Bone"..i,AnchorPoint=Vector2.new(.5,.5),BorderSizePixel=0,BackgroundColor3=accent,Visible=false,Active=false})
+ end
+ records[model]={humanoid=obj,highlight=h,info=info,text=t,lastCheck=0,inSight=false,skeleton=skeleton,bones=bones}
 end
 connect(workspace.DescendantAdded,function(obj) if obj:IsA("Humanoid") then task.defer(add,obj) end end)
 for _,obj in workspace:GetDescendants() do if obj:IsA("Humanoid") then add(obj) end end
@@ -160,6 +168,83 @@ local function characterVisible(camera,model,character,fallback)
  end
  return fallback~=nil and pointVisible(camera,model,fallback,character)
 end
+-- Squelette R15 : articulations de rig, avec repli sur le centre des pieces.
+local r15Bones={
+ {"Head","UpperTorso"},{"UpperTorso","LowerTorso"},
+ {"UpperTorso","LeftUpperArm"},{"LeftUpperArm","LeftLowerArm"},{"LeftLowerArm","LeftHand"},
+ {"UpperTorso","RightUpperArm"},{"RightUpperArm","RightLowerArm"},{"RightLowerArm","RightHand"},
+ {"LowerTorso","LeftUpperLeg"},{"LeftUpperLeg","LeftLowerLeg"},{"LeftLowerLeg","LeftFoot"},
+ {"LowerTorso","RightUpperLeg"},{"RightUpperLeg","RightLowerLeg"},{"RightLowerLeg","RightFoot"},
+}
+local function bodyPart(model,name)
+ local p=model:FindFirstChild(name)
+ return p and p:IsA("BasePart") and p or nil
+end
+local function jointPosition(part,attachmentName)
+ local attachment=part:FindFirstChild(attachmentName)
+ return attachment and attachment:IsA("Attachment") and attachment.WorldPosition or part.Position
+end
+local r15Points={
+ Head="NeckRigAttachment",UpperTorso="NeckRigAttachment",LowerTorso="WaistRigAttachment",
+ LeftUpperArm="LeftShoulderRigAttachment",LeftLowerArm="LeftElbowRigAttachment",LeftHand="LeftWristRigAttachment",
+ RightUpperArm="RightShoulderRigAttachment",RightLowerArm="RightElbowRigAttachment",RightHand="RightWristRigAttachment",
+ LeftUpperLeg="LeftHipRigAttachment",LeftLowerLeg="LeftKneeRigAttachment",LeftFoot="LeftAnkleRigAttachment",
+ RightUpperLeg="RightHipRigAttachment",RightLowerLeg="RightKneeRigAttachment",RightFoot="RightAnkleRigAttachment",
+}
+local function updateSkeleton(camera,model,r)
+ local enabled=r.espVisible and config.Skeleton
+ r.skeleton.Visible=enabled
+ if not enabled then return end
+ local segments={}
+ if bodyPart(model,"UpperTorso") then
+  for _,pair in r15Bones do
+   local a,b=bodyPart(model,pair[1]),bodyPart(model,pair[2])
+   if a and b then
+    local start=pair[1]=="Head" and a.Position or jointPosition(a,r15Points[pair[1]])
+    local finish=jointPosition(b,r15Points[pair[2]])
+    table.insert(segments,{start,finish})
+   end
+  end
+ else
+  -- R6 : points d'epaules et de hanches adaptes a la taille du torse.
+  local torso=bodyPart(model,"Torso")
+  if torso then
+   local function offset(x,y,z) return torso.CFrame:PointToWorldSpace(Vector3.new(x*torso.Size.X,y*torso.Size.Y,z*torso.Size.Z)) end
+   local top,bottom=offset(0,.4,0),offset(0,-.4,0)
+   table.insert(segments,{top,bottom})
+   local head=bodyPart(model,"Head")
+   if head then table.insert(segments,{head.Position,top}) end
+   for _,limb in {{"Left Arm",-.5,.4,top},{"Right Arm",.5,.4,top},{"Left Leg",-.25,-.4,bottom},{"Right Leg",.25,-.4,bottom}} do
+    local part=bodyPart(model,limb[1])
+    if part then
+     local joint=offset(limb[2],limb[3],0)
+     table.insert(segments,{limb[4],joint})
+     table.insert(segments,{joint,part.CFrame:PointToWorldSpace(Vector3.new(0,-part.Size.Y*.45,0))})
+    end
+   end
+  end
+ end
+ for i,line in r.bones do
+  local segment=segments[i]
+  line.Visible=false
+  if segment then
+   local a,screenA=camera:WorldToViewportPoint(segment[1])
+   local b,screenB=camera:WorldToViewportPoint(segment[2])
+   if screenA and screenB and a.Z>0 and b.Z>0 then
+    local first,second=Vector2.new(a.X,a.Y),Vector2.new(b.X,b.Y)
+    local delta=second-first
+    if delta.Magnitude>.5 then
+     local midpoint=(first+second)/2
+     line.Position=UDim2.fromOffset(midpoint.X,midpoint.Y)
+     line.Size=UDim2.fromOffset(delta.Magnitude,2)
+     line.Rotation=math.deg(math.atan2(delta.Y,delta.X))
+     line.BackgroundColor3=r.espColor
+     line.Visible=true
+    end
+   end
+  end
+ end
+end
 local params=RaycastParams.new(); params.FilterType=Enum.RaycastFilterType.Exclude
 RunService:BindToRenderStep(binding,Enum.RenderPriority.Camera.Value+1,function(dt)
  local camera=workspace.CurrentCamera; if not camera then return end
@@ -194,11 +279,12 @@ RunService:BindToRenderStep(binding,Enum.RenderPriority.Camera.Value+1,function(
    r.lastCheck=os.clock()
   elseif not visible then r.lastCheck=0 end
   local color=r.inSight and visibleColor or hiddenColor
-  r.highlight.Enabled=visible and (config.Outline or config.Fill)
+  r.highlight.Enabled=visible and config.Outline
   r.highlight.FillColor=color; r.highlight.OutlineColor=color
   r.highlight.OutlineTransparency=config.Outline and 0 or 1
-  r.highlight.FillTransparency=config.Fill and 0.88 or 1
+  r.highlight.FillTransparency=1 -- Contour de la silhouette uniquement.
   r.text.TextColor3=color
+  r.espVisible=visible; r.espColor=color
   r.info.Enabled=visible and (config.Names or config.Health or config.Distance); r.info.Adornee=part
   if visible then
    local lines={}
@@ -229,6 +315,8 @@ RunService:BindToRenderStep(binding,Enum.RenderPriority.Camera.Value+1,function(
  if bestPart and (bestPart.Position-camera.CFrame.Position).Magnitude>.001 then
   camera.CFrame=camera.CFrame:Lerp(CFrame.lookAt(camera.CFrame.Position,bestPart.Position),1-math.exp(-config.Smooth*dt))
  end
+ -- Projection apres le mouvement de camera pour suivre exactement les animations.
+ for model,r in records do updateSkeleton(camera,model,r) end
  stroke.Color=locked and Color3.fromRGB(255,184,85) or accent
  status.Text=locked and "Cible : "..locked.Name or string.format("%d cibles / %s",count,config.Aim and (aiming and "Recherche..." or "Maintiens le clic droit") or "Visee desactivee")
 end)
