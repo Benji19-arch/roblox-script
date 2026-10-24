@@ -1,183 +1,202 @@
--- LocalScript pour votre experience Roblox Studio.
--- Emplacement : StarterPlayer > StarterPlayerScripts.
--- Clic droit : viser. Inser : menu. Distances en studs.
+-- LocalScript : StarterPlayer > StarterPlayerScripts
+-- Clic droit maintenu : viser | Inser : menu
+-- PNJ allies : attribut Friendly=true ou TeamName=nom de votre equipe.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Input = game:GetService("UserInputService")
 local player = Players.LocalPlayer
-local config = {
-	ESP = true, Boxes = true, Names = true, Health = true,
-	Distance = true, Aim = true, Circle = true, TeamCheck = true,
-	Fov = 120, Smooth = 12, Range = 3000,
+local defaults = {
+ Aim=true, Bots=true, TargetPlayers=true, TeamCheck=true, WallCheck=true,
+ Sticky=true, ESP=true, Boxes=true, Names=true, Health=true, Distance=true,
+ Circle=true, Fov=160, Smooth=12, Range=1000, Part="Head",
 }
-local records, connections = {}, {}
-local aiming = false
-local gui = Instance.new("ScreenGui")
-gui.Name = "StudioESP"
-gui.IgnoreGuiInset = true
-gui.ResetOnSpawn = false
-gui.Parent = player:WaitForChild("PlayerGui")
-local function connect(event, callback)
-	table.insert(connections, event:Connect(callback))
+local config = table.clone(defaults)
+local records, connections, refreshers = {}, {}, {}
+local aiming, locked, stopped = false, nil, false
+local binding = "StudioAim_" .. game:GetService("HttpService"):GenerateGUID(false)
+local function connect(signal, callback)
+ local c=signal:Connect(callback); table.insert(connections,c); return c
 end
-local function make(class, parent, properties)
-	local instance = Instance.new(class)
-	for key, value in properties do instance[key] = value end
-	instance.Parent = parent
-	return instance
+local function make(class,parent,props)
+ local obj=Instance.new(class)
+ for k,v in props do obj[k]=v end
+ obj.Parent=parent; return obj
 end
-local circle = make("Frame", gui, {
-	AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
-	BackgroundTransparency = 1,
-})
-make("UICorner", circle, {CornerRadius = UDim.new(1, 0)})
-make("UIStroke", circle, {Color = Color3.new(1, 1, 1), Thickness = 1, Transparency = 0.3})
-local panel = make("Frame", gui, {
-	Position = UDim2.fromOffset(24, 80), Size = UDim2.fromOffset(250, 420),
-	BackgroundColor3 = Color3.fromRGB(24, 26, 36), BorderSizePixel = 0,
-})
-make("UICorner", panel, {CornerRadius = UDim.new(0, 10)})
-make("TextLabel", panel, {
-	Position = UDim2.fromOffset(10, 8), Size = UDim2.new(1, -20, 0, 32),
-	BackgroundTransparency = 1, Text = "STUDIO / ESP + VISEE",
-	TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold, TextSize = 15,
-})
-local row = 46
-local function button()
-	local item = make("TextButton", panel, {
-		Position = UDim2.fromOffset(12, row), Size = UDim2.new(1, -24, 0, 27),
-		BackgroundColor3 = Color3.fromRGB(39, 42, 56), BorderSizePixel = 0,
-		TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.Gotham, TextSize = 12,
-	})
-	row += 31
-	return item
+local bg=Color3.fromRGB(18,22,32)
+local card=Color3.fromRGB(31,38,52)
+local accent=Color3.fromRGB(75,220,185)
+local white=Color3.fromRGB(235,242,255)
+local function round(obj) make("UICorner",obj,{CornerRadius=UDim.new(0,9)}) end
+local function label(parent,value,pos,size)
+ return make("TextLabel",parent,{Text=value,Position=pos,Size=size,BackgroundTransparency=1,
+ TextColor3=white,TextSize=13,Font=Enum.Font.Gotham,TextXAlignment=Enum.TextXAlignment.Left})
 end
-for _, option in {
-	{"ESP", "ESP"}, {"Boxes", "Cadres"}, {"Names", "Noms"}, {"Health", "Vie"},
-	{"Distance", "Distance"}, {"Aim", "Aide a la visee"},
-	{"Circle", "Cercle de visee"}, {"TeamCheck", "Ignorer les allies"},
-} do
-	local key, title = option[1], option[2]
-	local item = button()
-	local function refresh() item.Text = title .. " : " .. (config[key] and "ON" or "OFF") end
-	connect(item.Activated, function() config[key] = not config[key]; refresh() end)
-	refresh()
+local pg=player:WaitForChild("PlayerGui")
+local old=pg:FindFirstChild("StudioAimPanel")
+if old then
+ local stop=old:FindFirstChild("Shutdown")
+ if stop and stop:IsA("BindableEvent") then stop:Fire() else old:Destroy() end
 end
-local fov = button()
-fov.Text = "Rayon : 120 px"
-connect(fov.Activated, function()
-	config.Fov = config.Fov == 240 and 60 or config.Fov + 60
-	fov.Text = "Rayon : " .. config.Fov .. " px"
-end)
-local smoothing = button()
-smoothing.Text = "Lissage : 12"
-connect(smoothing.Activated, function()
-	config.Smooth = config.Smooth == 24 and 6 or config.Smooth * 2
-	smoothing.Text = "Lissage : " .. config.Smooth
-end)
-make("TextLabel", panel, {
-	Position = UDim2.fromOffset(10, 365), Size = UDim2.new(1, -20, 0, 45),
-	BackgroundTransparency = 1, Text = "Clic droit : viser | Inser : menu\nPortee : 3000 studs",
-	TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.Gotham, TextSize = 11,
-})
-local function remove(other)
-	local record = records[other]
-	if record then
-		record.highlight:Destroy()
-		record.box:Destroy()
-		record.info:Destroy()
-		records[other] = nil
-	end
+local gui=make("ScreenGui",pg,{Name="StudioAimPanel",ResetOnSpawn=false,IgnoreGuiInset=true})
+local shutdown=make("BindableEvent",gui,{Name="Shutdown"})
+local circle=make("Frame",gui,{BackgroundTransparency=1,AnchorPoint=Vector2.new(.5,.5)})
+make("UICorner",circle,{CornerRadius=UDim.new(1,0)})
+local stroke=make("UIStroke",circle,{Color=accent,Thickness=1.5,Transparency=.25})
+local panel=make("Frame",gui,{Name="Panel",Position=UDim2.fromOffset(18,64),Size=UDim2.fromOffset(500,470),BackgroundColor3=bg,BorderSizePixel=0})
+round(panel)
+make("UIStroke",panel,{Color=card,Thickness=1})
+local scale=make("UIScale",panel,{Scale=1})
+label(panel,"STUDIO / ASSISTANCE",UDim2.fromOffset(18,14),UDim2.new(1,-36,0,28)).Font=Enum.Font.GothamBold
+label(panel,"Joueurs & PNJ - Reglages en temps reel",UDim2.fromOffset(18,42),UDim2.new(1,-36,0,22)).TextTransparency=.3
+local menu=make("TextButton",gui,{Name="Menu",Position=UDim2.fromOffset(18,18),Size=UDim2.fromOffset(140,34),Text="VISEE / MENU",BackgroundColor3=accent,TextColor3=bg,TextSize=12,Font=Enum.Font.GothamBold,BorderSizePixel=0})
+round(menu)
+connect(menu.Activated,function() panel.Visible=not panel.Visible; aiming=false; locked=nil end)
+local pages,buttons={},{}
+local function selectTab(name)
+ for title,page in pages do
+  page.Visible=title==name
+  buttons[title].BackgroundColor3=title==name and accent or card
+  buttons[title].TextColor3=title==name and bg or white
+ end
 end
-local function add(other, character)
-	remove(other)
-	local color = Color3.fromRGB(255, 85, 100)
-	local highlight = make("Highlight", gui, {
-		Adornee = character, FillColor = color, OutlineColor = color,
-		FillTransparency = 0.8, DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
-	})
-	local box = make("SelectionBox", gui, {
-		Adornee = character, Color3 = color, LineThickness = 0.035, SurfaceTransparency = 1,
-	})
-	local info = make("BillboardGui", gui, {
-		Size = UDim2.fromOffset(220, 58), StudsOffsetWorldSpace = Vector3.new(0, 3, 0),
-		AlwaysOnTop = true,
-	})
-	local text = make("TextLabel", info, {
-		Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
-		TextColor3 = Color3.new(1, 1, 1), TextStrokeTransparency = 0.25,
-		Font = Enum.Font.GothamBold, TextSize = 13,
-	})
-	local record = {character = character, highlight = highlight, box = box, info = info, text = text}
-	records[other] = record
-	return record
+for i,name in {"Visee","Cibles","Affichage","Reglages"} do
+ local b=make("TextButton",panel,{Position=UDim2.new((i-1)*.25,16,0,80),Size=UDim2.new(.25,-20,0,34),Text=name,BackgroundColor3=card,TextColor3=white,TextSize=12,Font=Enum.Font.GothamBold,BorderSizePixel=0})
+ round(b)
+ local page=make("ScrollingFrame",panel,{Name=name,Position=UDim2.fromOffset(16,128),Size=UDim2.new(1,-32,1,-190),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=3,ScrollBarImageColor3=accent,CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,Visible=false})
+ make("UIListLayout",page,{Padding=UDim.new(0,8),SortOrder=Enum.SortOrder.LayoutOrder})
+ make("UIPadding",page,{PaddingRight=UDim.new(0,6),PaddingBottom=UDim.new(0,8)})
+ pages[name],buttons[name]=page,b
+ connect(b.Activated,function() selectTab(name) end)
 end
-connect(Input.InputBegan, function(input, processed)
-	if processed then return end
-	if input.KeyCode == Enum.KeyCode.Insert then panel.Visible = not panel.Visible end
-	if input.UserInputType == Enum.UserInputType.MouseButton2 then aiming = true end
+local function setting(page,key,title,values,suffix)
+ local row=make("Frame",pages[page],{Size=UDim2.new(1,0,0,42),BackgroundColor3=card,BorderSizePixel=0}); round(row)
+ label(row,title,UDim2.fromOffset(10,0),UDim2.new(1,-150,1,0))
+ local b=make("TextButton",row,{Position=UDim2.new(1,-138,0,6),Size=UDim2.fromOffset(128,30),BackgroundColor3=bg,TextColor3=accent,TextSize=12,Font=Enum.Font.GothamBold,BorderSizePixel=0}); round(b)
+ local function refresh()
+  local v=config[key]
+  if typeof(v)=="boolean" then b.Text=v and "ACTIVE" or "DESACTIVE"
+  else b.Text=tostring(v)..(suffix or "") end
+  b.TextColor3=v==false and Color3.fromRGB(150,160,180) or accent
+ end
+ table.insert(refreshers,refresh)
+ connect(b.Activated,function()
+  if values then config[key]=values[((table.find(values,config[key]) or 0)%#values)+1]
+  else config[key]=not config[key] end
+  locked=nil; refresh()
+ end)
+ refresh()
+end
+setting("Visee","Aim","Assistance a la visee")
+setting("Visee","Part","Point vise",{"Head","HumanoidRootPart"})
+setting("Visee","Fov","Rayon de selection",{60,100,160,240,320}," px")
+setting("Visee","Smooth","Reactivite (+ = rapide)",{4,8,12,20,32})
+setting("Visee","Sticky","Conserver la cible")
+setting("Visee","WallCheck","Verifier les obstacles")
+setting("Cibles","TargetPlayers","Viser les joueurs")
+setting("Cibles","Bots","Viser les bots / PNJ")
+setting("Cibles","TeamCheck","Ignorer les allies")
+setting("Cibles","Range","Portee maximale",{150,300,600,1000,3000}," studs")
+for _,item in {{"ESP","Surbrillance"},{"Boxes","Cadres"},{"Names","Noms et type"},{"Health","Points de vie"},{"Distance","Distance"},{"Circle","Cercle de visee"}} do setting("Affichage",item[1],item[2]) end
+local help=label(pages.Reglages,"Clic droit maintenu : viser\nInser ou MENU : afficher / masquer\n\nBots : modeles avec un Humanoid.\nPNJ allies : Friendly=true ou TeamName.\nOrange : PNJ / Rose : joueur.\n\nClique sur les valeurs pour les changer.",UDim2.new(),UDim2.new(1,0,0,180))
+help.TextWrapped=true; help.TextYAlignment=Enum.TextYAlignment.Top
+local reset=make("TextButton",pages.Reglages,{Size=UDim2.new(1,0,0,40),Text="Retablir les reglages",BackgroundColor3=card,TextColor3=accent,TextSize=13,BorderSizePixel=0}); round(reset)
+connect(reset.Activated,function() config=table.clone(defaults); locked=nil; for _,f in refreshers do f() end end)
+local status=label(panel,"En attente",UDim2.new(0,18,1,-52),UDim2.new(1,-36,0,22)); status.TextColor3=accent
+label(panel,"CLIC DROIT : VISER / INSER : MENU",UDim2.new(0,18,1,-28),UDim2.new(1,-36,0,18)).TextSize=10
+selectTab("Visee")
+local function remove(model)
+ local r=records[model]; if not r then return end
+ r.highlight:Destroy(); r.box:Destroy(); r.info:Destroy(); records[model]=nil
+ if locked==model then locked=nil end
+end
+local function add(obj)
+ if stopped or not obj:IsA("Humanoid") then return end
+ local model=obj.Parent
+ if not model or not model:IsA("Model") or records[model] or not model:IsDescendantOf(workspace) then return end
+ local h=make("Highlight",gui,{Adornee=model,Enabled=false,FillTransparency=.82,DepthMode=Enum.HighlightDepthMode.AlwaysOnTop})
+ local b=make("SelectionBox",gui,{Adornee=model,Visible=false,LineThickness=.035,SurfaceTransparency=1})
+ local info=make("BillboardGui",gui,{Size=UDim2.fromOffset(230,64),StudsOffsetWorldSpace=Vector3.new(0,3,0),AlwaysOnTop=true,Enabled=false})
+ local t=label(info,"",UDim2.new(),UDim2.fromScale(1,1)); t.TextXAlignment=Enum.TextXAlignment.Center; t.TextStrokeTransparency=.25
+ records[model]={humanoid=obj,highlight=h,box=b,info=info,text=t}
+end
+connect(workspace.DescendantAdded,function(obj) if obj:IsA("Humanoid") then task.defer(add,obj) end end)
+for _,obj in workspace:GetDescendants() do if obj:IsA("Humanoid") then add(obj) end end
+connect(Input.InputBegan,function(input,processed)
+ if processed or Input:GetFocusedTextBox() then return end
+ if input.KeyCode==Enum.KeyCode.Insert then panel.Visible=not panel.Visible end
+ if input.UserInputType==Enum.UserInputType.MouseButton2 then aiming=true end
 end)
-connect(Input.InputEnded, function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton2 then aiming = false end
+connect(Input.InputEnded,function(input) if input.UserInputType==Enum.UserInputType.MouseButton2 then aiming=false; locked=nil end end)
+connect(Input.WindowFocusReleased,function() aiming=false; locked=nil end)
+local params=RaycastParams.new(); params.FilterType=Enum.RaycastFilterType.Exclude
+RunService:BindToRenderStep(binding,Enum.RenderPriority.Camera.Value+1,function(dt)
+ local camera=workspace.CurrentCamera; if not camera then return end
+ local viewport=camera.ViewportSize
+ scale.Scale=math.max(.1,math.min(1,(viewport.X-36)/500,(viewport.Y-82)/470))
+ circle.Size=UDim2.fromOffset(config.Fov*2,config.Fov*2)
+ circle.Position=UDim2.fromOffset(viewport.X/2,viewport.Y/2)
+ circle.Visible=config.Circle and config.Aim
+ local character=player.Character
+ local root=character and character:FindFirstChild("HumanoidRootPart")
+ local humanoid=character and character:FindFirstChildOfClass("Humanoid")
+ local canAim=aiming and config.Aim and humanoid and humanoid.Health>0 and not Input:GetFocusedTextBox()
+ params.FilterDescendantsInstances=character and {character} or {}
+ local bestModel,bestPart,best,stickyPart=nil,nil,config.Fov,nil
+ local count=0
+ for model,r in records do
+  if not model:IsDescendantOf(workspace) or r.humanoid.Parent~=model then remove(model); continue end
+  local owner=Players:GetPlayerFromCharacter(model)
+  local bot=owner==nil
+  local part=model:FindFirstChild(config.Part) or model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Head") or model.PrimaryPart
+  if part and not part:IsA("BasePart") then part=nil end
+  local allied=false
+  if config.TeamCheck then
+   if owner then allied=not player.Neutral and not owner.Neutral and player.Team~=nil and player.Team==owner.Team
+   else allied=model:GetAttribute("Friendly")==true or (not player.Neutral and player.Team~=nil and model:GetAttribute("TeamName")==player.Team.Name) end
+  end
+  local distance=part and root and (part.Position-root.Position).Magnitude or math.huge
+  local eligible=model~=character and owner~=player and (bot and config.Bots or not bot and config.TargetPlayers) and not allied and r.humanoid.Health>0 and part~=nil and distance<=config.Range
+  local visible=config.ESP and eligible
+  local color=bot and Color3.fromRGB(255,184,85) or Color3.fromRGB(255,100,130)
+  r.highlight.Enabled=visible; r.highlight.FillColor=color; r.highlight.OutlineColor=color
+  r.box.Visible=visible and config.Boxes; r.box.Color3=color
+  r.info.Enabled=visible and (config.Names or config.Health or config.Distance); r.info.Adornee=part
+  if visible then
+   local lines={}
+   if config.Names then table.insert(lines,bot and "[PNJ] "..model.Name or "[JOUEUR] "..owner.DisplayName) end
+   if config.Health then table.insert(lines,string.format("Vie : %.0f / %.0f",r.humanoid.Health,r.humanoid.MaxHealth)) end
+   if config.Distance then table.insert(lines,string.format("%.0f studs",distance)) end
+   r.text.Text=table.concat(lines,"\n")
+  end
+  if eligible then count+=1 end
+  if canAim and eligible then
+   local point,onScreen=camera:WorldToViewportPoint(part.Position)
+   local score=(Vector2.new(point.X,point.Y)-viewport/2).Magnitude
+   if onScreen and point.Z>0 and score<=config.Fov and (score<=best or model==locked) then
+    local hit
+    if config.WallCheck then hit=workspace:Raycast(camera.CFrame.Position,part.Position-camera.CFrame.Position,params) end
+    if not hit or hit.Instance:IsDescendantOf(model) then
+     if model==locked then stickyPart=part end
+     if score<=best then bestModel,bestPart,best=model,part,score end
+    end
+   end
+  end
+ end
+ if canAim and config.Sticky and stickyPart then bestModel,bestPart=locked,stickyPart end
+ locked=canAim and bestModel or nil
+ if bestPart and (bestPart.Position-camera.CFrame.Position).Magnitude>.001 then
+  camera.CFrame=camera.CFrame:Lerp(CFrame.lookAt(camera.CFrame.Position,bestPart.Position),1-math.exp(-config.Smooth*dt))
+ end
+ stroke.Color=locked and Color3.fromRGB(255,184,85) or accent
+ status.Text=locked and "Cible : "..locked.Name or string.format("%d cibles / %s",count,config.Aim and (aiming and "Recherche..." or "Maintiens le clic droit") or "Visee desactivee")
 end)
-connect(Input.WindowFocusReleased, function() aiming = false end)
-connect(Players.PlayerRemoving, remove)
-local binding = "StudioESP_" .. game:GetService("HttpService"):GenerateGUID(false)
-RunService:BindToRenderStep(binding, Enum.RenderPriority.Camera.Value + 1, function(dt)
-	local camera = workspace.CurrentCamera
-	if not camera then return end
-	circle.Size = UDim2.fromOffset(config.Fov * 2, config.Fov * 2)
-	circle.Visible = config.Circle and config.Aim
-	local center = camera.ViewportSize / 2
-	local character = player.Character
-	local localRoot = character and character:FindFirstChild("HumanoidRootPart")
-	local localHumanoid = character and character:FindFirstChildOfClass("Humanoid")
-	local canAim = aiming and config.Aim and localHumanoid and localHumanoid.Health > 0
-		and not Input:GetFocusedTextBox()
-	local target, best = nil, config.Fov
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	params.FilterDescendantsInstances = character and {character} or {}
-	for _, other in Players:GetPlayers() do
-		if other == player then continue end
-		local enemy = other.Character
-		if not enemy then remove(other); continue end
-		local record = records[other]
-		if not record or record.character ~= enemy then record = add(other, enemy) end
-		local humanoid = enemy:FindFirstChildOfClass("Humanoid")
-		local head = enemy:FindFirstChild("Head")
-		local root = enemy:FindFirstChild("HumanoidRootPart")
-		local allied = config.TeamCheck and not player.Neutral and not other.Neutral and player.Team == other.Team
-		local distance = root and localRoot and (root.Position - localRoot.Position).Magnitude or math.huge
-		local eligible = not allied and humanoid ~= nil and humanoid.Health > 0 and head ~= nil and distance <= config.Range
-		local visible = config.ESP and eligible
-		record.highlight.Enabled = visible
-		record.box.Visible = visible and config.Boxes
-		record.info.Enabled = visible and (config.Names or config.Health or config.Distance)
-		record.info.Adornee = head
-		if visible then
-			local lines = {}
-			if config.Names then table.insert(lines, other.DisplayName) end
-			if config.Health then table.insert(lines, string.format("Vie : %.0f / %.0f", humanoid.Health, humanoid.MaxHealth)) end
-			if config.Distance then table.insert(lines, string.format("%.0f studs", distance)) end
-			record.text.Text = table.concat(lines, "\n")
-		end
-		if canAim and eligible then
-			local point, onScreen = camera:WorldToViewportPoint(head.Position)
-			local delta = (Vector2.new(point.X, point.Y) - center).Magnitude
-			if onScreen and delta < best then
-				local hit = workspace:Raycast(camera.CFrame.Position, head.Position - camera.CFrame.Position, params)
-				if not hit or hit.Instance:IsDescendantOf(enemy) then target, best = head, delta end
-			end
-		end
-	end
-	if target then
-		camera.CFrame = camera.CFrame:Lerp(CFrame.lookAt(camera.CFrame.Position, target.Position), 1 - math.exp(-config.Smooth * dt))
-	end
-end)
-connect(script.Destroying, function()
-	RunService:UnbindFromRenderStep(binding)
-	for _, connection in connections do connection:Disconnect() end
-	for other in records do remove(other) end
-	gui:Destroy()
-end)
+local function cleanup()
+ if stopped then return end
+ stopped=true; RunService:UnbindFromRenderStep(binding)
+ for _,c in connections do c:Disconnect() end
+ for model in records do remove(model) end
+ gui:Destroy()
+end
+connect(shutdown.Event,cleanup)
+connect(script.Destroying,cleanup)
+connect(gui.Destroying,cleanup)
