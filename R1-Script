@@ -9,6 +9,7 @@ local defaults = {
  Aim=true, Bots=true, TargetPlayers=true, TeamCheck=true, WallCheck=true,
  Sticky=true, ESP=true, Outline=true, Skeleton=true, Names=true, Health=true, Distance=true,
  Circle=true, Fov=160, Smooth=12, Range=1000, Part="Head",
+ Activation="Maintenir", MaxESP=16, SkeletonFPS=20,
 }
 local config = table.clone(defaults)
 local records, connections, refreshers = {}, {}, {}
@@ -90,6 +91,7 @@ local function setting(page,key,title,values,suffix)
  refresh()
 end
 setting("Visee","Aim","Assistance a la visee")
+setting("Visee","Activation","Activation",{"Maintenir","Permanent"})
 setting("Visee","Part","Point vise",{"Head","HumanoidRootPart"})
 setting("Visee","Fov","Rayon de selection",{60,100,160,240,320}," px")
 setting("Visee","Smooth","Reactivite (+ = rapide)",{4,8,12,20,32})
@@ -100,6 +102,8 @@ setting("Cibles","Bots","Viser les bots / PNJ")
 setting("Cibles","TeamCheck","Ignorer les allies")
 setting("Cibles","Range","Portee maximale",{150,300,600,1000,3000}," studs")
 for _,item in {{"ESP","Activer ESP"},{"Outline","Contour de silhouette"},{"Skeleton","Squelette"},{"Names","Noms et type"},{"Health","Points de vie"},{"Distance","Distance"},{"Circle","Cercle de visee"}} do setting("Affichage",item[1],item[2]) end
+setting("Reglages","MaxESP","Personnages ESP max",{8,16,24})
+setting("Reglages","SkeletonFPS","Fluidite du squelette",{10,20,30}," Hz")
 local help=label(pages.Reglages,"Clic droit maintenu : viser\nInser ou MENU : afficher / masquer\n\nBots : modeles avec un Humanoid.\nPNJ allies : Friendly=true ou TeamName.\nVert : visible / Rouge : cache.\n\nClique sur les valeurs pour les changer.",UDim2.new(),UDim2.new(1,0,0,180))
 help.TextWrapped=true; help.TextYAlignment=Enum.TextYAlignment.Top
 local reset=make("TextButton",pages.Reglages,{Size=UDim2.new(1,0,0,40),Text="Retablir les reglages",BackgroundColor3=card,TextColor3=accent,TextSize=13,BorderSizePixel=0}); round(reset)
@@ -107,68 +111,112 @@ connect(reset.Activated,function() config=table.clone(defaults); locked=nil; for
 local status=label(panel,"En attente",UDim2.new(0,18,1,-52),UDim2.new(1,-36,0,22)); status.TextColor3=accent
 label(panel,"CLIC DROIT : VISER / INSER : MENU",UDim2.new(0,18,1,-28),UDim2.new(1,-36,0,18)).TextSize=10
 selectTab("Visee")
+-- Travail espace dans le temps : registre 10 Hz, visee 12,5 Hz, squelette 20 Hz.
+-- Seul le mouvement de camera est applique a chaque image.
+local SCAN_INTERVAL, AIM_INTERVAL = 0.1, 0.08
+local VISIBILITY_BUDGET = 4
+local registryList, aimCandidates, displayList, activeRecords = {}, {}, {}, {}
+local localCharacter, localRoot, localHumanoid
+local focused, scanClock, aimClock, boneClock = true, 0, 0, 0
+local rightHeld=false
+local visibilityCursor, selectionMessage = 0, "Maintiens le clic droit"
+local visibleColor, hiddenColor = Color3.fromRGB(65,235,120), Color3.fromRGB(255,65,80)
+local function releaseVisuals(r)
+ if r.highlight then r.highlight:Destroy(); r.highlight=nil end
+ if r.info then r.info:Destroy(); r.info=nil; r.text=nil end
+ if r.skeleton then r.skeleton:Destroy(); r.skeleton=nil; r.bones=nil end
+ r.rig=nil
+end
 local function remove(model)
- local r=records[model]; if not r then return end
- r.highlight:Destroy(); r.info:Destroy(); r.skeleton:Destroy(); records[model]=nil
- if locked==model then locked=nil end
+ local r=records[model]
+ if not r then return end
+ releaseVisuals(r)
+ activeRecords[r]=nil
+ records[model]=nil
+ if locked==r then locked=nil end
 end
-local function add(obj)
- if stopped or not obj:IsA("Humanoid") then return end
- local model=obj.Parent
- if not model or not model:IsA("Model") or records[model] or not model:IsDescendantOf(workspace) then return end
- local h=make("Highlight",gui,{Adornee=model,Enabled=false,FillTransparency=1,OutlineTransparency=0,DepthMode=Enum.HighlightDepthMode.AlwaysOnTop})
- local info=make("BillboardGui",gui,{Size=UDim2.fromOffset(230,64),StudsOffsetWorldSpace=Vector3.new(0,3,0),AlwaysOnTop=true,Enabled=false})
- local t=label(info,"",UDim2.new(),UDim2.fromScale(1,1)); t.TextXAlignment=Enum.TextXAlignment.Center; t.TextStrokeTransparency=.25
- local skeleton=make("Frame",gui,{Name="Skeleton",Size=UDim2.fromScale(1,1),BackgroundTransparency=1,Visible=false,ZIndex=0})
- local bones={}
- for i=1,15 do
-  bones[i]=make("Frame",skeleton,{Name="Bone"..i,AnchorPoint=Vector2.new(.5,.5),BorderSizePixel=0,BackgroundColor3=accent,Visible=false,Active=false})
- end
- records[model]={humanoid=obj,highlight=h,info=info,text=t,lastCheck=0,inSight=false,skeleton=skeleton,bones=bones}
+local function add(h)
+ if stopped or not h:IsA("Humanoid") then return end
+ local model=h.Parent
+ if not model or not model:IsA("Model") or not model:IsDescendantOf(workspace) then return end
+ local oldRecord=records[model]
+ if oldRecord and oldRecord.humanoid==h then return end
+ if oldRecord then remove(model) end
+ records[model]={model=model,humanoid=h,inSight=false}
 end
-connect(workspace.DescendantAdded,function(obj) if obj:IsA("Humanoid") then task.defer(add,obj) end end)
-for _,obj in workspace:GetDescendants() do if obj:IsA("Humanoid") then add(obj) end end
-connect(Input.InputBegan,function(input,processed)
- if processed or Input:GetFocusedTextBox() then return end
- if input.KeyCode==Enum.KeyCode.Insert then panel.Visible=not panel.Visible end
- if input.UserInputType==Enum.UserInputType.MouseButton2 then aiming=true end
+connect(workspace.DescendantAdded,function(obj)
+ if obj:IsA("Humanoid") then task.defer(add,obj) end
 end)
-connect(Input.InputEnded,function(input) if input.UserInputType==Enum.UserInputType.MouseButton2 then aiming=false; locked=nil end end)
-connect(Input.WindowFocusReleased,function() aiming=false; locked=nil end)
--- La couleur ESP est independante du filtre d'obstacles de la visee.
-local visibleColor=Color3.fromRGB(65,235,120)
-local hiddenColor=Color3.fromRGB(255,65,80)
-local sampleNames={"Head","UpperTorso","Torso","HumanoidRootPart","LeftHand","RightHand","LeftFoot","RightFoot","Left Arm","Right Arm","Left Leg","Right Leg"}
-local function pointVisible(camera,model,part,character)
- local point,onScreen=camera:WorldToViewportPoint(part.Position)
- if not onScreen or point.Z<=0 then return false end
+connect(workspace.DescendantRemoving,function(obj)
+ if obj:IsA("Humanoid") and obj.Parent then
+  local r=records[obj.Parent]
+  if r and r.humanoid==obj then remove(obj.Parent) end
+ end
+end)
+-- Pas de creation de GUI pour tous les Humanoids du monde.
+task.defer(function()
+ for i,obj in workspace:GetDescendants() do
+  if stopped then return end
+  if obj:IsA("Humanoid") then add(obj) end
+  if i%500==0 then task.wait() end
+ end
+end)
+connect(Input.InputBegan,function(input,processed)
+ if input.UserInputType==Enum.UserInputType.MouseButton2 then rightHeld=true end
+ if not processed and not Input:GetFocusedTextBox() and input.KeyCode==Enum.KeyCode.Insert then
+  panel.Visible=not panel.Visible
+ end
+end)
+connect(Input.InputEnded,function(input)
+ if input.UserInputType==Enum.UserInputType.MouseButton2 then rightHeld=false end
+end)
+connect(Input.WindowFocusReleased,function() focused=false; rightHeld=false; locked=nil end)
+connect(Input.WindowFocused,function() focused=true end)
+local rayParams=RaycastParams.new()
+rayParams.FilterType=Enum.RaycastFilterType.Exclude
+rayParams.IgnoreWater=true
+local rayIgnored={}
+local function clearTo(camera,model,position)
  local origin=camera.CFrame.Position
- local direction=part.Position-origin
+ local direction=position-origin
  if direction.Magnitude<0.001 then return true end
- local ignored=character and {character} or {}
- local check=RaycastParams.new()
- check.FilterType=Enum.RaycastFilterType.Exclude
- check.IgnoreWater=true
- -- Ignore uniquement les pieces presque totalement transparentes.
- for _=1,8 do
-  check.FilterDescendantsInstances=ignored
-  local hit=workspace:Raycast(origin,direction,check)
+ table.clear(rayIgnored)
+ if localCharacter then table.insert(rayIgnored,localCharacter) end
+ -- Les bras et l'arme de premiere personne ne doivent pas bloquer la visee.
+ table.insert(rayIgnored,camera)
+ for _=1,6 do
+  rayParams.FilterDescendantsInstances=rayIgnored
+  local hit=workspace:Raycast(origin,direction,rayParams)
   if not hit or hit.Instance:IsDescendantOf(model) then return true end
-  local obstacle=hit.Instance
-  if obstacle:IsA("BasePart") and obstacle.Transparency>=0.95 then
-   table.insert(ignored,obstacle)
+  if hit.Instance:IsA("BasePart") and hit.Instance.Transparency>=0.95 then
+   table.insert(rayIgnored,hit.Instance)
   else return false end
  end
  return false
 end
-local function characterVisible(camera,model,character,fallback)
- for _,name in sampleNames do
-  local part=model:FindFirstChild(name)
-  if part and part:IsA("BasePart") and pointVisible(camera,model,part,character) then return true end
- end
- return fallback~=nil and pointVisible(camera,model,fallback,character)
+local function partOf(model,name)
+ local part=model:FindFirstChild(name)
+ return part and part:IsA("BasePart") and part or nil
 end
--- Squelette R15 : articulations de rig, avec repli sur le centre des pieces.
+local function valid(r)
+ return r and records[r.model]==r and r.eligible and r.humanoid.Health>0
+  and r.aimPart and r.aimPart:IsDescendantOf(workspace)
+end
+local function screenScore(camera,r)
+ if not valid(r) then return nil end
+ local p,onScreen=camera:WorldToViewportPoint(r.aimPart.Position)
+ if not onScreen or p.Z<=0 then return nil end
+ local delta=(Vector2.new(p.X,p.Y)-camera.ViewportSize/2).Magnitude
+ return delta<=config.Fov and delta or nil
+end
+local function allocateVisuals(r)
+ if r.highlight then return end
+ r.highlight=make("Highlight",gui,{Adornee=r.model,Enabled=false,FillTransparency=1,
+  OutlineTransparency=0,DepthMode=Enum.HighlightDepthMode.AlwaysOnTop})
+ r.info=make("BillboardGui",gui,{Size=UDim2.fromOffset(230,78),StudsOffsetWorldSpace=Vector3.new(0,3,0),AlwaysOnTop=true,Enabled=false})
+ r.text=label(r.info,"",UDim2.new(),UDim2.fromScale(1,1))
+ r.text.TextXAlignment=Enum.TextXAlignment.Center; r.text.TextStrokeTransparency=.25
+end
 local r15Bones={
  {"Head","UpperTorso"},{"UpperTorso","LowerTorso"},
  {"UpperTorso","LeftUpperArm"},{"LeftUpperArm","LeftLowerArm"},{"LeftLowerArm","LeftHand"},
@@ -176,149 +224,221 @@ local r15Bones={
  {"LowerTorso","LeftUpperLeg"},{"LeftUpperLeg","LeftLowerLeg"},{"LeftLowerLeg","LeftFoot"},
  {"LowerTorso","RightUpperLeg"},{"RightUpperLeg","RightLowerLeg"},{"RightLowerLeg","RightFoot"},
 }
-local function bodyPart(model,name)
- local p=model:FindFirstChild(name)
- return p and p:IsA("BasePart") and p or nil
-end
-local function jointPosition(part,attachmentName)
- local attachment=part:FindFirstChild(attachmentName)
- return attachment and attachment:IsA("Attachment") and attachment.WorldPosition or part.Position
-end
-local r15Points={
- Head="NeckRigAttachment",UpperTorso="NeckRigAttachment",LowerTorso="WaistRigAttachment",
+local r15Points={UpperTorso="NeckRigAttachment",LowerTorso="WaistRigAttachment",
  LeftUpperArm="LeftShoulderRigAttachment",LeftLowerArm="LeftElbowRigAttachment",LeftHand="LeftWristRigAttachment",
  RightUpperArm="RightShoulderRigAttachment",RightLowerArm="RightElbowRigAttachment",RightHand="RightWristRigAttachment",
  LeftUpperLeg="LeftHipRigAttachment",LeftLowerLeg="LeftKneeRigAttachment",LeftFoot="LeftAnkleRigAttachment",
- RightUpperLeg="RightHipRigAttachment",RightLowerLeg="RightKneeRigAttachment",RightFoot="RightAnkleRigAttachment",
-}
-local function updateSkeleton(camera,model,r)
- local enabled=r.espVisible and config.Skeleton
- r.skeleton.Visible=enabled
- if not enabled then return end
- local segments={}
- if bodyPart(model,"UpperTorso") then
+ RightUpperLeg="RightHipRigAttachment",RightLowerLeg="RightKneeRigAttachment",RightFoot="RightAnkleRigAttachment"}
+local function rigPoint(part,attachmentName,offset)
+ local attachment=attachmentName and part:FindFirstChild(attachmentName)
+ return {part=part,attachment=attachment and attachment:IsA("Attachment") and attachment or nil,offset=offset or Vector3.zero}
+end
+local function worldPoint(ref)
+ if not ref.part:IsDescendantOf(workspace) then return nil end
+ if ref.attachment and ref.attachment.Parent then return ref.attachment.WorldPosition end
+ return ref.part.CFrame:PointToWorldSpace(ref.offset)
+end
+local function allocateSkeleton(r)
+ if r.skeleton then return end
+ local rig={}
+ local function segment(a,b) table.insert(rig,{a,b}) end
+ if partOf(r.model,"UpperTorso") then
   for _,pair in r15Bones do
-   local a,b=bodyPart(model,pair[1]),bodyPart(model,pair[2])
-   if a and b then
-    local start=pair[1]=="Head" and a.Position or jointPosition(a,r15Points[pair[1]])
-    local finish=jointPosition(b,r15Points[pair[2]])
-    table.insert(segments,{start,finish})
-   end
+   local a,b=partOf(r.model,pair[1]),partOf(r.model,pair[2])
+   if a and b then segment(rigPoint(a,r15Points[pair[1]]),rigPoint(b,r15Points[pair[2]])) end
   end
  else
-  -- R6 : points d'epaules et de hanches adaptes a la taille du torse.
-  local torso=bodyPart(model,"Torso")
+  local torso=partOf(r.model,"Torso")
   if torso then
-   local function offset(x,y,z) return torso.CFrame:PointToWorldSpace(Vector3.new(x*torso.Size.X,y*torso.Size.Y,z*torso.Size.Z)) end
-   local top,bottom=offset(0,.4,0),offset(0,-.4,0)
-   table.insert(segments,{top,bottom})
-   local head=bodyPart(model,"Head")
-   if head then table.insert(segments,{head.Position,top}) end
+   local function torsoPoint(x,y) return rigPoint(torso,nil,Vector3.new(x*torso.Size.X,y*torso.Size.Y,0)) end
+   local top,bottom=torsoPoint(0,.4),torsoPoint(0,-.4)
+   segment(top,bottom)
+   local head=partOf(r.model,"Head")
+   if head then segment(rigPoint(head),top) end
    for _,limb in {{"Left Arm",-.5,.4,top},{"Right Arm",.5,.4,top},{"Left Leg",-.25,-.4,bottom},{"Right Leg",.25,-.4,bottom}} do
-    local part=bodyPart(model,limb[1])
+    local part=partOf(r.model,limb[1])
     if part then
-     local joint=offset(limb[2],limb[3],0)
-     table.insert(segments,{limb[4],joint})
-     table.insert(segments,{joint,part.CFrame:PointToWorldSpace(Vector3.new(0,-part.Size.Y*.45,0))})
+     local joint=torsoPoint(limb[2],limb[3])
+     segment(limb[4],joint)
+     segment(joint,rigPoint(part,nil,Vector3.new(0,-part.Size.Y*.45,0)))
     end
    end
   end
  end
+ r.rig=rig; r.bones={}
+ r.skeleton=make("Frame",gui,{Name="Skeleton",Size=UDim2.fromScale(1,1),BackgroundTransparency=1,Visible=false,ZIndex=0})
+ for i=1,#rig do
+  r.bones[i]=make("Frame",r.skeleton,{AnchorPoint=Vector2.new(.5,.5),BorderSizePixel=0,Visible=false,Active=false})
+ end
+end
+local function updateSkeleton(camera,r)
+ if not config.Skeleton then if r.skeleton then r.skeleton.Visible=false end; return end
+ allocateSkeleton(r)
+ r.skeleton.Visible=true
  for i,line in r.bones do
-  local segment=segments[i]
+  local bone=r.rig[i]
+  local a,b=worldPoint(bone[1]),worldPoint(bone[2])
   line.Visible=false
-  if segment then
-   local a,screenA=camera:WorldToViewportPoint(segment[1])
-   local b,screenB=camera:WorldToViewportPoint(segment[2])
-   if screenA and screenB and a.Z>0 and b.Z>0 then
-    local first,second=Vector2.new(a.X,a.Y),Vector2.new(b.X,b.Y)
+  if a and b then
+   local pa,sa=camera:WorldToViewportPoint(a)
+   local pb,sb=camera:WorldToViewportPoint(b)
+   if sa and sb and pa.Z>0 and pb.Z>0 then
+    local first,second=Vector2.new(pa.X,pa.Y),Vector2.new(pb.X,pb.Y)
     local delta=second-first
     if delta.Magnitude>.5 then
      local midpoint=(first+second)/2
      line.Position=UDim2.fromOffset(midpoint.X,midpoint.Y)
      line.Size=UDim2.fromOffset(delta.Magnitude,2)
      line.Rotation=math.deg(math.atan2(delta.Y,delta.X))
-     line.BackgroundColor3=r.espColor
+     line.BackgroundColor3=r.inSight and visibleColor or hiddenColor
      line.Visible=true
     end
    end
   end
  end
 end
-local params=RaycastParams.new(); params.FilterType=Enum.RaycastFilterType.Exclude
-RunService:BindToRenderStep(binding,Enum.RenderPriority.Camera.Value+1,function(dt)
- local camera=workspace.CurrentCamera; if not camera then return end
- local viewport=camera.ViewportSize
- scale.Scale=math.max(.1,math.min(1,(viewport.X-36)/500,(viewport.Y-82)/470))
- circle.Size=UDim2.fromOffset(config.Fov*2,config.Fov*2)
- circle.Position=UDim2.fromOffset(viewport.X/2,viewport.Y/2)
- circle.Visible=config.Circle and config.Aim
- local character=player.Character
- local root=character and character:FindFirstChild("HumanoidRootPart")
- local humanoid=character and character:FindFirstChildOfClass("Humanoid")
- local canAim=aiming and config.Aim and humanoid and humanoid.Health>0 and not Input:GetFocusedTextBox()
- params.FilterDescendantsInstances=character and {character} or {}
- local bestModel,bestPart,best,stickyPart=nil,nil,config.Fov,nil
- local count=0
+local function scan(camera)
+ localCharacter=player.Character
+ localRoot=localCharacter and (partOf(localCharacter,"HumanoidRootPart") or localCharacter.PrimaryPart or partOf(localCharacter,"Head"))
+ localHumanoid=localCharacter and localCharacter:FindFirstChildOfClass("Humanoid")
+ table.clear(aimCandidates); table.clear(displayList); table.clear(registryList)
  for model,r in records do
   if not model:IsDescendantOf(workspace) or r.humanoid.Parent~=model then remove(model); continue end
+  r.eligible=false
+  if model==localCharacter or not localRoot or r.humanoid.Health<=0 then continue end
   local owner=Players:GetPlayerFromCharacter(model)
+  if owner==player then continue end
   local bot=owner==nil
-  local part=model:FindFirstChild(config.Part) or model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Head") or model.PrimaryPart
-  if part and not part:IsA("BasePart") then part=nil end
+  if (bot and not config.Bots) or (not bot and not config.TargetPlayers) then continue end
   local allied=false
   if config.TeamCheck then
    if owner then allied=not player.Neutral and not owner.Neutral and player.Team~=nil and player.Team==owner.Team
    else allied=model:GetAttribute("Friendly")==true or (not player.Neutral and player.Team~=nil and model:GetAttribute("TeamName")==player.Team.Name) end
   end
-  local distance=part and root and (part.Position-root.Position).Magnitude or math.huge
-  local eligible=model~=character and owner~=player and (bot and config.Bots or not bot and config.TargetPlayers) and not allied and r.humanoid.Health>0 and part~=nil and distance<=config.Range
-  local visible=config.ESP and eligible
-  if visible and os.clock()-r.lastCheck>=0.1 then
-   r.inSight=characterVisible(camera,model,character,part)
-   r.lastCheck=os.clock()
-  elseif not visible then r.lastCheck=0 end
+  if allied then continue end
+  local root=partOf(model,"HumanoidRootPart") or model.PrimaryPart
+  local part=partOf(model,config.Part) or root or partOf(model,"Head")
+  if not part or not part:IsA("BasePart") then continue end
+  local distance=((root or part).Position-localRoot.Position).Magnitude
+  if distance>config.Range then continue end
+  r.owner=owner; r.bot=bot; r.distance=distance; r.aimPart=part; r.eligible=true
+  r.head=partOf(model,"Head"); r.torso=partOf(model,"UpperTorso") or partOf(model,"Torso"); r.root=root
+  table.insert(aimCandidates,r)
+  if config.ESP then
+   local p,onScreen=camera:WorldToViewportPoint(part.Position)
+   if onScreen and p.Z>0 then table.insert(displayList,r) end
+  end
+ end
+ table.sort(displayList,function(a,b) return a.distance<b.distance end)
+ local selected={}
+ for i=1,math.min(config.MaxESP,#displayList) do selected[displayList[i]]=true end
+ for r in activeRecords do
+  if not selected[r] then releaseVisuals(r); activeRecords[r]=nil end
+ end
+ for r in selected do allocateVisuals(r); activeRecords[r]=true; table.insert(registryList,r) end
+ -- Budget fixe : 4 personnages, 3 points maximum chacun par mise a jour.
+ local checks=math.min(VISIBILITY_BUDGET,#registryList)
+ for _=1,checks do
+  visibilityCursor=visibilityCursor%#registryList+1
+  local r=registryList[visibilityCursor]
+  local inSight=false
+  for _,part in {r.head or r.aimPart,r.torso or r.aimPart,r.root or r.aimPart} do
+   local p,onScreen=camera:WorldToViewportPoint(part.Position)
+   if onScreen and p.Z>0 and clearTo(camera,r.model,part.Position) then inSight=true; break end
+  end
+  r.inSight=inSight
+ end
+ for r in activeRecords do
   local color=r.inSight and visibleColor or hiddenColor
-  r.highlight.Enabled=visible and config.Outline
-  r.highlight.FillColor=color; r.highlight.OutlineColor=color
-  r.highlight.OutlineTransparency=config.Outline and 0 or 1
-  r.highlight.FillTransparency=1 -- Contour de la silhouette uniquement.
-  r.text.TextColor3=color
-  r.espVisible=visible; r.espColor=color
-  r.info.Enabled=visible and (config.Names or config.Health or config.Distance); r.info.Adornee=part
-  if visible then
+  r.highlight.Enabled=config.Outline
+  r.highlight.OutlineColor=color
+  r.info.Adornee=r.head or r.aimPart
+  r.info.Enabled=config.Names or config.Health or config.Distance
+  if r.info.Enabled then
    local lines={}
    if config.Names then
-    table.insert(lines,bot and "[PNJ] "..model.Name or "[JOUEUR] "..owner.DisplayName)
+    table.insert(lines,r.bot and "[PNJ] "..r.model.Name or "[JOUEUR] "..r.owner.DisplayName)
     table.insert(lines,r.inSight and "VISIBLE" or "CACHE")
    end
    if config.Health then table.insert(lines,string.format("Vie : %.0f / %.0f",r.humanoid.Health,r.humanoid.MaxHealth)) end
-   if config.Distance then table.insert(lines,string.format("%.0f studs",distance)) end
-   r.text.Text=table.concat(lines,"\n")
+   if config.Distance then table.insert(lines,string.format("%.0f studs",r.distance)) end
+   local value=table.concat(lines,"\n")
+   if r.text.Text~=value then r.text.Text=value end
+   r.text.TextColor3=color
   end
-  if eligible then count+=1 end
-  if canAim and eligible then
-   local point,onScreen=camera:WorldToViewportPoint(part.Position)
-   local score=(Vector2.new(point.X,point.Y)-viewport/2).Magnitude
-   if onScreen and point.Z>0 and score<=config.Fov and (score<=best or model==locked) then
-    local hit
-    if config.WallCheck then hit=workspace:Raycast(camera.CFrame.Position,part.Position-camera.CFrame.Position,params) end
-    if not hit or hit.Instance:IsDescendantOf(model) then
-     if model==locked then stickyPart=part end
-     if score<=best then bestModel,bestPart,best=model,part,score end
-    end
+  if not config.Skeleton and r.skeleton then r.skeleton.Visible=false end
+ end
+end
+local shortlist={}
+local function acquire(camera)
+ if config.Sticky and screenScore(camera,locked) then
+  if not config.WallCheck or clearTo(camera,locked.model,locked.aimPart.Position) then return end
+ end
+ locked=nil
+ table.clear(shortlist)
+ for _,r in aimCandidates do
+  local score=screenScore(camera,r)
+  if score then
+   r.score=score
+   local index=#shortlist+1
+   for i,other in shortlist do if score<other.score then index=i; break end end
+   if index<=6 then
+    table.insert(shortlist,index,r)
+    if #shortlist>6 then table.remove(shortlist) end
    end
   end
  end
- if canAim and config.Sticky and stickyPart then bestModel,bestPart=locked,stickyPart end
- locked=canAim and bestModel or nil
- if bestPart and (bestPart.Position-camera.CFrame.Position).Magnitude>.001 then
-  camera.CFrame=camera.CFrame:Lerp(CFrame.lookAt(camera.CFrame.Position,bestPart.Position),1-math.exp(-config.Smooth*dt))
+ for _,r in shortlist do
+  if not config.WallCheck or clearTo(camera,r.model,r.aimPart.Position) then locked=r; break end
  end
- -- Projection apres le mouvement de camera pour suivre exactement les animations.
- for model,r in records do updateSkeleton(camera,model,r) end
- stroke.Color=locked and Color3.fromRGB(255,184,85) or accent
- status.Text=locked and "Cible : "..locked.Name or string.format("%d cibles / %s",count,config.Aim and (aiming and "Recherche..." or "Maintiens le clic droit") or "Visee desactivee")
+ selectionMessage=#shortlist==0 and "Aucune cible dans le rayon / verifie Cibles" or "Cible bloquee par un obstacle"
+end
+local function setStatus(value) if status.Text~=value then status.Text=value end end
+connect(RunService.Heartbeat,function(dt)
+ if stopped then return end
+ scanClock+=dt
+ if scanClock<SCAN_INTERVAL then return end
+ scanClock=0
+ local camera=workspace.CurrentCamera
+ if not camera then return end
+ scan(camera)
+ local viewport=camera.ViewportSize
+ local wantedScale=math.max(.1,math.min(1,(viewport.X-36)/500,(viewport.Y-82)/470))
+ if scale.Scale~=wantedScale then scale.Scale=wantedScale end
+ circle.Size=UDim2.fromOffset(config.Fov*2,config.Fov*2)
+ circle.Position=UDim2.fromOffset(viewport.X/2,viewport.Y/2)
+ circle.Visible=config.Circle and config.Aim
+ if not config.Aim then setStatus("Visee desactivee")
+ elseif not localHumanoid or localHumanoid.Health<=0 then setStatus("En attente de ton personnage vivant")
+ elseif Input:GetFocusedTextBox() then setStatus("Ferme la saisie de texte pour viser")
+ elseif not aiming then setStatus("Maintiens le clic droit / mode "..config.Activation)
+ elseif locked then setStatus("Cible : "..locked.model.Name)
+ else setStatus(selectionMessage) end
+ stroke.Color=locked and visibleColor or accent
+end)
+RunService:BindToRenderStep(binding,Enum.RenderPriority.Last.Value,function(dt)
+ if stopped then return end
+ local camera=workspace.CurrentCamera
+ if not camera then return end
+ -- Lecture directe : le clic droit reste detecte meme s'il est consomme par la camera Roblox.
+ aiming=focused and config.Aim and not Input:GetFocusedTextBox()
+  and (config.Activation=="Permanent" or rightHeld or Input:IsMouseButtonPressed(Enum.UserInputType.MouseButton2))
+ local canAim=aiming and localHumanoid and localHumanoid.Health>0
+ aimClock+=dt
+ if canAim then
+  if aimClock>=AIM_INTERVAL then aimClock=0; acquire(camera) end
+  if valid(locked) then
+   local position=camera.CFrame.Position
+   if (locked.aimPart.Position-position).Magnitude>.001 then
+    camera.CFrame=camera.CFrame:Lerp(CFrame.lookAt(position,locked.aimPart.Position),1-math.exp(-config.Smooth*dt))
+   end
+  else locked=nil end
+ else locked=nil; aimClock=AIM_INTERVAL end
+ boneClock+=dt
+ if boneClock>=1/config.SkeletonFPS then
+  boneClock=0
+  for r in activeRecords do updateSkeleton(camera,r) end
+ end
 end)
 local function cleanup()
  if stopped then return end
