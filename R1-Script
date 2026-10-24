@@ -7,7 +7,7 @@ local Input = game:GetService("UserInputService")
 local player = Players.LocalPlayer
 local defaults = {
  Aim=true, Bots=true, TargetPlayers=true, TeamCheck=true, WallCheck=true,
- Sticky=true, ESP=true, Boxes=true, Names=true, Health=true, Distance=true,
+ Sticky=true, ESP=true, Outline=true, Fill=false, Names=true, Health=true, Distance=true,
  Circle=true, Fov=160, Smooth=12, Range=1000, Part="Head",
 }
 local config = table.clone(defaults)
@@ -96,8 +96,8 @@ setting("Cibles","TargetPlayers","Viser les joueurs")
 setting("Cibles","Bots","Viser les bots / PNJ")
 setting("Cibles","TeamCheck","Ignorer les allies")
 setting("Cibles","Range","Portee maximale",{150,300,600,1000,3000}," studs")
-for _,item in {{"ESP","Surbrillance"},{"Boxes","Cadres"},{"Names","Noms et type"},{"Health","Points de vie"},{"Distance","Distance"},{"Circle","Cercle de visee"}} do setting("Affichage",item[1],item[2]) end
-local help=label(pages.Reglages,"Clic droit maintenu : viser\nInser ou MENU : afficher / masquer\n\nBots : modeles avec un Humanoid.\nPNJ allies : Friendly=true ou TeamName.\nOrange : PNJ / Rose : joueur.\n\nClique sur les valeurs pour les changer.",UDim2.new(),UDim2.new(1,0,0,180))
+for _,item in {{"ESP","Activer ESP"},{"Outline","Contour du personnage"},{"Fill","Remplissage leger"},{"Names","Noms et type"},{"Health","Points de vie"},{"Distance","Distance"},{"Circle","Cercle de visee"}} do setting("Affichage",item[1],item[2]) end
+local help=label(pages.Reglages,"Clic droit maintenu : viser\nInser ou MENU : afficher / masquer\n\nBots : modeles avec un Humanoid.\nPNJ allies : Friendly=true ou TeamName.\nVert : visible / Rouge : cache.\n\nClique sur les valeurs pour les changer.",UDim2.new(),UDim2.new(1,0,0,180))
 help.TextWrapped=true; help.TextYAlignment=Enum.TextYAlignment.Top
 local reset=make("TextButton",pages.Reglages,{Size=UDim2.new(1,0,0,40),Text="Retablir les reglages",BackgroundColor3=card,TextColor3=accent,TextSize=13,BorderSizePixel=0}); round(reset)
 connect(reset.Activated,function() config=table.clone(defaults); locked=nil; for _,f in refreshers do f() end end)
@@ -106,18 +106,17 @@ label(panel,"CLIC DROIT : VISER / INSER : MENU",UDim2.new(0,18,1,-28),UDim2.new(
 selectTab("Visee")
 local function remove(model)
  local r=records[model]; if not r then return end
- r.highlight:Destroy(); r.box:Destroy(); r.info:Destroy(); records[model]=nil
+ r.highlight:Destroy(); r.info:Destroy(); records[model]=nil
  if locked==model then locked=nil end
 end
 local function add(obj)
  if stopped or not obj:IsA("Humanoid") then return end
  local model=obj.Parent
  if not model or not model:IsA("Model") or records[model] or not model:IsDescendantOf(workspace) then return end
- local h=make("Highlight",gui,{Adornee=model,Enabled=false,FillTransparency=.82,DepthMode=Enum.HighlightDepthMode.AlwaysOnTop})
- local b=make("SelectionBox",gui,{Adornee=model,Visible=false,LineThickness=.035,SurfaceTransparency=1})
+ local h=make("Highlight",gui,{Adornee=model,Enabled=false,FillTransparency=1,OutlineTransparency=0,DepthMode=Enum.HighlightDepthMode.AlwaysOnTop})
  local info=make("BillboardGui",gui,{Size=UDim2.fromOffset(230,64),StudsOffsetWorldSpace=Vector3.new(0,3,0),AlwaysOnTop=true,Enabled=false})
  local t=label(info,"",UDim2.new(),UDim2.fromScale(1,1)); t.TextXAlignment=Enum.TextXAlignment.Center; t.TextStrokeTransparency=.25
- records[model]={humanoid=obj,highlight=h,box=b,info=info,text=t}
+ records[model]={humanoid=obj,highlight=h,info=info,text=t,lastCheck=0,inSight=false}
 end
 connect(workspace.DescendantAdded,function(obj) if obj:IsA("Humanoid") then task.defer(add,obj) end end)
 for _,obj in workspace:GetDescendants() do if obj:IsA("Humanoid") then add(obj) end end
@@ -128,6 +127,39 @@ connect(Input.InputBegan,function(input,processed)
 end)
 connect(Input.InputEnded,function(input) if input.UserInputType==Enum.UserInputType.MouseButton2 then aiming=false; locked=nil end end)
 connect(Input.WindowFocusReleased,function() aiming=false; locked=nil end)
+-- La couleur ESP est independante du filtre d'obstacles de la visee.
+local visibleColor=Color3.fromRGB(65,235,120)
+local hiddenColor=Color3.fromRGB(255,65,80)
+local sampleNames={"Head","UpperTorso","Torso","HumanoidRootPart","LeftHand","RightHand","LeftFoot","RightFoot","Left Arm","Right Arm","Left Leg","Right Leg"}
+local function pointVisible(camera,model,part,character)
+ local point,onScreen=camera:WorldToViewportPoint(part.Position)
+ if not onScreen or point.Z<=0 then return false end
+ local origin=camera.CFrame.Position
+ local direction=part.Position-origin
+ if direction.Magnitude<0.001 then return true end
+ local ignored=character and {character} or {}
+ local check=RaycastParams.new()
+ check.FilterType=Enum.RaycastFilterType.Exclude
+ check.IgnoreWater=true
+ -- Ignore uniquement les pieces presque totalement transparentes.
+ for _=1,8 do
+  check.FilterDescendantsInstances=ignored
+  local hit=workspace:Raycast(origin,direction,check)
+  if not hit or hit.Instance:IsDescendantOf(model) then return true end
+  local obstacle=hit.Instance
+  if obstacle:IsA("BasePart") and obstacle.Transparency>=0.95 then
+   table.insert(ignored,obstacle)
+  else return false end
+ end
+ return false
+end
+local function characterVisible(camera,model,character,fallback)
+ for _,name in sampleNames do
+  local part=model:FindFirstChild(name)
+  if part and part:IsA("BasePart") and pointVisible(camera,model,part,character) then return true end
+ end
+ return fallback~=nil and pointVisible(camera,model,fallback,character)
+end
 local params=RaycastParams.new(); params.FilterType=Enum.RaycastFilterType.Exclude
 RunService:BindToRenderStep(binding,Enum.RenderPriority.Camera.Value+1,function(dt)
  local camera=workspace.CurrentCamera; if not camera then return end
@@ -157,13 +189,23 @@ RunService:BindToRenderStep(binding,Enum.RenderPriority.Camera.Value+1,function(
   local distance=part and root and (part.Position-root.Position).Magnitude or math.huge
   local eligible=model~=character and owner~=player and (bot and config.Bots or not bot and config.TargetPlayers) and not allied and r.humanoid.Health>0 and part~=nil and distance<=config.Range
   local visible=config.ESP and eligible
-  local color=bot and Color3.fromRGB(255,184,85) or Color3.fromRGB(255,100,130)
-  r.highlight.Enabled=visible; r.highlight.FillColor=color; r.highlight.OutlineColor=color
-  r.box.Visible=visible and config.Boxes; r.box.Color3=color
+  if visible and os.clock()-r.lastCheck>=0.1 then
+   r.inSight=characterVisible(camera,model,character,part)
+   r.lastCheck=os.clock()
+  elseif not visible then r.lastCheck=0 end
+  local color=r.inSight and visibleColor or hiddenColor
+  r.highlight.Enabled=visible and (config.Outline or config.Fill)
+  r.highlight.FillColor=color; r.highlight.OutlineColor=color
+  r.highlight.OutlineTransparency=config.Outline and 0 or 1
+  r.highlight.FillTransparency=config.Fill and 0.88 or 1
+  r.text.TextColor3=color
   r.info.Enabled=visible and (config.Names or config.Health or config.Distance); r.info.Adornee=part
   if visible then
    local lines={}
-   if config.Names then table.insert(lines,bot and "[PNJ] "..model.Name or "[JOUEUR] "..owner.DisplayName) end
+   if config.Names then
+    table.insert(lines,bot and "[PNJ] "..model.Name or "[JOUEUR] "..owner.DisplayName)
+    table.insert(lines,r.inSight and "VISIBLE" or "CACHE")
+   end
    if config.Health then table.insert(lines,string.format("Vie : %.0f / %.0f",r.humanoid.Health,r.humanoid.MaxHealth)) end
    if config.Distance then table.insert(lines,string.format("%.0f studs",distance)) end
    r.text.Text=table.concat(lines,"\n")
