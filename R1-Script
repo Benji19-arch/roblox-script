@@ -102,7 +102,7 @@ setting("Cibles","TargetPlayers","Viser les joueurs")
 setting("Cibles","Bots","Viser les bots / PNJ")
 setting("Cibles","TeamCheck","Ignorer les allies")
 setting("Cibles","Range","Portee maximale",{150,300,600,1000,3000}," studs")
-for _,item in {{"ESP","Activer ESP"},{"Outline","Contour de silhouette"},{"Skeleton","Squelette"},{"Names","Noms et type"},{"Health","Points de vie"},{"Distance","Distance"},{"Circle","Cercle de visee"}} do setting("Affichage",item[1],item[2]) end
+for _,item in {{"ESP","Activer ESP"},{"Outline","Contour de silhouette"},{"Skeleton","Squelette"},{"Names","Noms des joueurs"},{"Health","Points de vie"},{"Distance","Distance"},{"Circle","Cercle de visee"}} do setting("Affichage",item[1],item[2]) end
 setting("Reglages","MaxESP","Personnages ESP max",{8,16,24})
 setting("Reglages","SkeletonFPS","Fluidite du squelette",{10,20,30}," Hz")
 local help=label(pages.Reglages,"Clic droit maintenu : viser\nInser ou MENU : afficher / masquer\n\nBots : modeles avec un Humanoid.\nPNJ allies : Friendly=true ou TeamName.\nVert : visible / Rouge : cache.\n\nClique sur les valeurs pour les changer.",UDim2.new(),UDim2.new(1,0,0,180))
@@ -128,9 +128,25 @@ local function releaseVisuals(r)
  if r.skeleton then r.skeleton:Destroy(); r.skeleton=nil; r.bones=nil end
  r.rig=nil
 end
+-- Masquage local des noms Roblox des PNJ, restaure au nettoyage.
+local function hideBotName(r,hide)
+ local h=r.humanoid
+ if hide then
+  if r.previousDisplayType==nil then
+   r.previousDisplayType=h.DisplayDistanceType
+   h.DisplayDistanceType=Enum.HumanoidDisplayDistanceType.None
+  end
+ elseif r.previousDisplayType~=nil then
+  if h.Parent and h.DisplayDistanceType==Enum.HumanoidDisplayDistanceType.None then
+   h.DisplayDistanceType=r.previousDisplayType
+  end
+  r.previousDisplayType=nil
+ end
+end
 local function remove(model)
  local r=records[model]
  if not r then return end
+ hideBotName(r,false)
  releaseVisuals(r)
  activeRecords[r]=nil
  records[model]=nil
@@ -306,8 +322,9 @@ local function scan(camera)
  for model,r in records do
   if not model:IsDescendantOf(workspace) or r.humanoid.Parent~=model then remove(model); continue end
   r.eligible=false
-  if model==localCharacter or not localRoot or r.humanoid.Health<=0 then continue end
   local owner=Players:GetPlayerFromCharacter(model)
+  hideBotName(r,model~=localCharacter and owner==nil)
+  if model==localCharacter or not localRoot or r.humanoid.Health<=0 then continue end
   if owner==player then continue end
   local bot=owner==nil
   if (bot and not config.Bots) or (not bot and not config.TargetPlayers) then continue end
@@ -360,7 +377,7 @@ local function scan(camera)
   if r.info.Enabled then
    local lines={}
    if config.Names then
-    table.insert(lines,r.bot and "[PNJ] "..r.model.Name or "[JOUEUR] "..r.owner.DisplayName)
+    if not r.bot and r.owner then table.insert(lines,"[JOUEUR] "..r.owner.DisplayName) end
     table.insert(lines,r.inSight and "VISIBLE" or "CACHE")
    end
    if config.Health then table.insert(lines,string.format("Vie : %.0f / %.0f",r.humanoid.Health,r.humanoid.MaxHealth)) end
@@ -424,7 +441,9 @@ connect(RunService.Heartbeat,function(dt)
  elseif not localHumanoid or localHumanoid.Health<=0 then setStatus("En attente de ton personnage vivant")
  elseif Input:GetFocusedTextBox() then setStatus("Ferme la saisie de texte pour viser")
  elseif not aiming then setStatus("Maintiens le clic droit / mode "..config.Activation)
- elseif locked then setStatus((aimBlocked and "Obstacle bref : " or "Cible : ")..locked.model.Name)
+ elseif locked then
+  local targetName=locked.bot and "PNJ" or (locked.owner and locked.owner.DisplayName or "Joueur")
+  setStatus((aimBlocked and "Obstacle bref : " or "Cible : ")..targetName)
  else setStatus(selectionMessage) end
  stroke.Color=locked and visibleColor or accent
 end)
