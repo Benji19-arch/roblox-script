@@ -8,7 +8,7 @@ local Input = game:GetService("UserInputService")
 local player = Players.LocalPlayer
 local defaults = {
  Aim=true, Bots=true, TargetPlayers=true, TeamCheck=true, ThroughWalls=true,
- Sticky=true, ESP=true, Outline=true, Skeleton=true, Names=true, Health=true, Distance=true,
+ Sticky=true, ESP=true, Outline=true, Skeleton=true, Names=true, Health=true, HealthNumbers=true, HealthThickness=3, Distance=true,
  Circle=true, Fov=160, Smooth=12, Range=1000, Part="Head",
  Activation="Maintenir", Tracking="Direct", MaxESP=16, SkeletonFPS=20,
 }
@@ -24,10 +24,10 @@ local function make(class,parent,props)
  for k,v in props do obj[k]=v end
  obj.Parent=parent; return obj
 end
-local bg=Color3.fromRGB(21,22,27)
-local card=Color3.fromRGB(27,28,34)
-local accent=Color3.fromRGB(217,45,174)
-local white=Color3.fromRGB(235,242,255)
+local bg=Color3.fromRGB(17,17,20)
+local card=Color3.fromRGB(29,29,32)
+local accent=Color3.fromRGB(213,12,183)
+local white=Color3.fromRGB(229,229,235)
 local function round(obj) make("UICorner",obj,{CornerRadius=UDim.new(0,9)}) end
 local function label(parent,value,pos,size)
  return make("TextLabel",parent,{Text=value,Position=pos,Size=size,BackgroundTransparency=1,
@@ -49,34 +49,41 @@ local panel=make("Frame",gui,{Name="Panel",Position=UDim2.fromOffset(18,64),Size
 round(panel)
 make("UIStroke",panel,{Color=Color3.fromRGB(58,59,69),Thickness=1})
 local scale=make("UIScale",panel,{Scale=1})
-local muted=Color3.fromRGB(145,148,163)
-local rowColor=Color3.fromRGB(33,34,41)
-local sidebar=make("Frame",panel,{Size=UDim2.new(0,155,1,0),BackgroundColor3=Color3.fromRGB(17,18,23),BorderSizePixel=0})
+local muted=Color3.fromRGB(123,123,136)
+local rowColor=Color3.fromRGB(31,31,35)
+local sidebar=make("Frame",panel,{Size=UDim2.new(0,155,1,0),BackgroundColor3=Color3.fromRGB(24,24,27),BorderSizePixel=0})
 round(sidebar)
-local brand=label(sidebar,"R1",UDim2.fromOffset(20,17),UDim2.fromOffset(110,30))
-brand.TextSize=25; brand.Font=Enum.Font.GothamBold; brand.TextColor3=accent
-label(sidebar,"CONTROL PANEL",UDim2.fromOffset(21,49),UDim2.fromOffset(125,18)).TextSize=10
+local avatar=make("Frame",sidebar,{Position=UDim2.fromOffset(16,18),Size=UDim2.fromOffset(25,25),BackgroundColor3=Color3.fromRGB(45,30,46),BorderSizePixel=0})
+make("UICorner",avatar,{CornerRadius=UDim.new(1,0)})
+local avatarText=label(avatar,"R",UDim2.new(),UDim2.fromScale(1,1)); avatarText.TextColor3=accent; avatarText.TextXAlignment=Enum.TextXAlignment.Center; avatarText.Font=Enum.Font.GothamBold
+local brand=label(sidebar,"R1",UDim2.fromOffset(50,17),UDim2.fromOffset(91,18))
+brand.TextSize=13; brand.Font=Enum.Font.GothamBold
+local brandSub=label(sidebar,"Control panel",UDim2.fromOffset(50,35),UDim2.fromOffset(100,15)); brandSub.TextSize=10; brandSub.TextColor3=muted
 local header=make("Frame",panel,{Position=UDim2.fromOffset(155,0),Size=UDim2.new(1,-155,0,80),BackgroundTransparency=1,Active=true})
 local heading=label(header,"Visuels",UDim2.fromOffset(22,15),UDim2.new(1,-80,0,26))
-heading.TextSize=21; heading.Font=Enum.Font.GothamBold
+heading.Visible=false
 local subtitle=label(header,"",UDim2.fromOffset(22,45),UDim2.new(1,-64,0,22))
-subtitle.TextSize=11; subtitle.TextColor3=muted
-local close=make("TextButton",header,{Position=UDim2.new(1,-46,0,20),Size=UDim2.fromOffset(28,28),Text="X",TextSize=13,Font=Enum.Font.GothamBold,BackgroundColor3=card,TextColor3=muted,BorderSizePixel=0})
+subtitle.Visible=false
+local topBar=make("Frame",header,{Position=UDim2.fromOffset(8,8),Size=UDim2.new(1,-54,0,26),BackgroundTransparency=1})
+local close=make("TextButton",header,{Position=UDim2.new(1,-34,0,8),Size=UDim2.fromOffset(24,26),Text="X",TextSize=13,Font=Enum.Font.GothamBold,BackgroundColor3=card,TextColor3=muted,BorderSizePixel=0})
 round(close)
 connect(close.Activated,function() panel.Visible=false end)
 local menu=make("TextButton",gui,{Name="Menu",Position=UDim2.fromOffset(18,18),Size=UDim2.fromOffset(124,32),Text="R1 / MENU",TextSize=12,Font=Enum.Font.GothamBold,BackgroundColor3=bg,TextColor3=accent,BorderSizePixel=0,ZIndex=6})
 round(menu); make("UIStroke",menu,{Color=accent,Thickness=1})
 connect(menu.Activated,function() panel.Visible=not panel.Visible end)
-local pages,buttons,indicators,columns={},{},{},{}
-local titles={Affichage="Visuels",Visee="Visee",Cibles="Cibles",Reglages="Reglages"}
+local pages,buttons,indicators,columns,topButtons={},{},{},{},{}
+local titles={Affichage="Visuels",Visee="Aimbot",Cibles="Cibles",Reglages="Session"}
+local topTitles={Affichage="Joueurs / PNJ",Visee="Visee",Cibles="Cibles",Reglages="Reglages"}
 local descriptions={Affichage="Silhouette, squelette et informations des personnages",Visee="Activation, suivi de la tete et obstacles",Cibles="Choisis les joueurs et les PNJ a suivre",Reglages="Performances, raccourcis et reinitialisation"}
 local function selectTab(name)
  heading.Text=titles[name]; subtitle.Text=descriptions[name]
  for key,page in pages do
   local selected=key==name
   page.Visible=selected; indicators[key].Visible=selected
-  buttons[key].BackgroundColor3=selected and Color3.fromRGB(53,29,49) or sidebar.BackgroundColor3
-  buttons[key].TextColor3=selected and accent or muted
+  buttons[key].BackgroundColor3=sidebar.BackgroundColor3
+  buttons[key].TextColor3=selected and white or muted
+  topButtons[key].TextColor3=selected and accent or muted
+  topButtons[key].BackgroundColor3=selected and Color3.fromRGB(36,30,37) or Color3.fromRGB(29,29,32)
  end
 end
 local function column(parent,x,title)
@@ -88,13 +95,25 @@ local function column(parent,x,title)
  return scroll
 end
 for index,name in {"Affichage","Visee","Cibles","Reglages"} do
- local b=make("TextButton",sidebar,{Position=UDim2.fromOffset(12,95+(index-1)*47),Size=UDim2.fromOffset(131,39),Text=string.format("0%d   %s",index,titles[name]),TextXAlignment=Enum.TextXAlignment.Left,TextSize=13,Font=Enum.Font.GothamMedium,BackgroundColor3=sidebar.BackgroundColor3,TextColor3=muted,BorderSizePixel=0,AutoButtonColor=false})
- round(b); make("UIPadding",b,{PaddingLeft=UDim.new(0,12)})
- local marker=make("Frame",b,{Position=UDim2.fromOffset(0,10),Size=UDim2.fromOffset(3,19),BackgroundColor3=accent,BorderSizePixel=0})
- local page=make("Frame",panel,{Name=name,Position=UDim2.fromOffset(172,89),Size=UDim2.new(1,-190,1,-151),BackgroundTransparency=1,Visible=false})
+ local b=make("TextButton",sidebar,{Position=UDim2.fromOffset(12,73+(index-1)*32),Size=UDim2.fromOffset(131,29),Text=titles[name],TextXAlignment=Enum.TextXAlignment.Left,TextSize=13,Font=Enum.Font.GothamMedium,BackgroundColor3=sidebar.BackgroundColor3,TextColor3=muted,BorderSizePixel=0,AutoButtonColor=false})
+ make("UIPadding",b,{PaddingLeft=UDim.new(0,33)})
+ local icon=make("Frame",b,{Position=UDim2.fromOffset(13,9),Size=UDim2.fromOffset(13,11),BackgroundTransparency=1,BorderSizePixel=0})
+ make("UICorner",icon,{CornerRadius=UDim.new(1,0)})
+ make("UIStroke",icon,{Color=muted,Thickness=1.2})
+ local pupil=make("Frame",icon,{AnchorPoint=Vector2.new(.5,.5),Position=UDim2.fromScale(.5,.5),Size=UDim2.fromOffset(3,3),BackgroundColor3=muted,BorderSizePixel=0})
+ make("UICorner",pupil,{CornerRadius=UDim.new(1,0)})
+ if name=="Visee" then icon.Size=UDim2.fromOffset(12,12)
+ elseif name=="Cibles" then icon.Rotation=45
+ elseif name=="Reglages" then icon.Size=UDim2.fromOffset(12,8) end
+ local marker=make("Frame",b,{Position=UDim2.fromOffset(5,8),Size=UDim2.fromOffset(2,13),BackgroundColor3=accent,BorderSizePixel=0})
+ local page=make("Frame",panel,{Name=name,Position=UDim2.fromOffset(162,48),Size=UDim2.new(1,-176,1,-104),BackgroundTransparency=1,Visible=false})
  pages[name],buttons[name],indicators[name]=page,b,marker
- columns[name]={left=column(page,0,"OPTIONS"),right=column(page,.5,"REGLAGES")}
+ columns[name]={left=column(page,0,titles[name]),right=column(page,.5,"Settings")}
+ local top=make("TextButton",topBar,{Position=UDim2.new((index-1)*.25,0,0,0),Size=UDim2.new(.25,-6,1,0),Text=topTitles[name],TextSize=11,Font=Enum.Font.GothamMedium,TextColor3=muted,BackgroundColor3=card,BorderSizePixel=0,AutoButtonColor=false})
+ make("UICorner",top,{CornerRadius=UDim.new(0,3)})
+ topButtons[name]=top
  connect(b.Activated,function() selectTab(name) end)
+ connect(top.Activated,function() selectTab(name) end)
 end
 local activeSlider=nil
 local function refreshAll() for _,refresh in refreshers do refresh() end end
@@ -103,29 +122,30 @@ local function changed(key,value)
  config[key]=value; locked=nil; refreshAll()
 end
 local displayValues={Head="Tete",HumanoidRootPart="Torse",Maintenir="Clic droit maintenu",Permanent="Toujours active",Direct="Direct",Fluide="Fluide"}
-local function setting(page,key,title,values,suffix)
+local function setting(page,key,title,values,suffix,side)
  local numeric=values and typeof(values[1])=="number"
- local parent=values and columns[page].right or columns[page].left
- local row=make("Frame",parent,{Size=UDim2.new(1,0,0,values and 66 or 50),BackgroundColor3=rowColor,BorderSizePixel=0}); round(row)
- local caption=label(row,title,UDim2.fromOffset(10,5),UDim2.new(1,values and -20 or -70,0,20)); caption.TextSize=11
+ local parent=side and columns[page][side] or (values and columns[page].right or columns[page].left)
+ local row=make("Frame",parent,{Size=UDim2.new(1,0,0,values and 56 or 27),BackgroundTransparency=1,BorderSizePixel=0})
+ local caption=label(row,title,UDim2.fromOffset(1,4),UDim2.new(1,numeric and -88 or -35,0,20)); caption.TextSize=11
  if not values then
-  local state=label(row,"",UDim2.fromOffset(10,26),UDim2.new(1,-70,0,14)); state.TextSize=10
-  local toggle=make("TextButton",row,{Position=UDim2.new(1,-52,0,14),Size=UDim2.fromOffset(42,22),Text="",BorderSizePixel=0,AutoButtonColor=false})
-  round(toggle)
-  local knob=make("Frame",toggle,{Position=UDim2.fromOffset(3,3),Size=UDim2.fromOffset(16,16),BackgroundColor3=white,BorderSizePixel=0}); round(knob)
+  local toggle=make("TextButton",row,{Position=UDim2.new(1,-30,0,0),Size=UDim2.fromOffset(28,27),Text="",BackgroundTransparency=1,BorderSizePixel=0,AutoButtonColor=false})
+  local ring=make("Frame",toggle,{Position=UDim2.fromOffset(8,7),Size=UDim2.fromOffset(12,12),BackgroundTransparency=1,BorderSizePixel=0})
+  make("UICorner",ring,{CornerRadius=UDim.new(1,0)})
+  local outline=make("UIStroke",ring,{Thickness=2,Color=accent})
+  local dot=make("Frame",ring,{AnchorPoint=Vector2.new(.5,.5),Position=UDim2.fromScale(.5,.5),Size=UDim2.fromOffset(6,6),BackgroundColor3=accent,BorderSizePixel=0})
+  make("UICorner",dot,{CornerRadius=UDim.new(1,0)})
   local function refresh()
    local enabled=config[key]
-   toggle.BackgroundColor3=enabled and accent or Color3.fromRGB(66,67,78)
-   knob.Position=UDim2.fromOffset(enabled and 23 or 3,3)
-   state.Text=enabled and "Active" or "Desactive"; state.TextColor3=enabled and accent or muted
+   outline.Color=enabled and accent or Color3.fromRGB(78,78,90)
+   dot.Visible=enabled
   end
   table.insert(refreshers,refresh); connect(toggle.Activated,function() changed(key,not config[key]) end); refresh()
  elseif numeric then
-  local value=label(row,"",UDim2.fromOffset(10,25),UDim2.new(1,-20,0,16)); value.TextSize=11; value.TextColor3=accent
-  local track=make("TextButton",row,{Position=UDim2.fromOffset(12,44),Size=UDim2.new(1,-24,0,16),BackgroundTransparency=1,Text="",AutoButtonColor=false})
+  local value=label(row,"",UDim2.new(1,-87,0,4),UDim2.fromOffset(85,20)); value.TextSize=11; value.TextColor3=white; value.TextXAlignment=Enum.TextXAlignment.Right
+  local track=make("TextButton",row,{Position=UDim2.fromOffset(2,28),Size=UDim2.new(1,-5,0,16),BackgroundTransparency=1,Text="",AutoButtonColor=false})
   local rail=make("Frame",track,{Position=UDim2.new(0,0,.5,-2),Size=UDim2.new(1,0,0,4),BackgroundColor3=Color3.fromRGB(63,64,76),BorderSizePixel=0}); round(rail)
   local fill=make("Frame",rail,{Size=UDim2.fromScale(0,1),BackgroundColor3=accent,BorderSizePixel=0}); round(fill)
-  local knob=make("Frame",track,{AnchorPoint=Vector2.new(.5,.5),Position=UDim2.fromScale(0,.5),Size=UDim2.fromOffset(10,10),BackgroundColor3=white,BorderSizePixel=0}); round(knob)
+  local knob=make("Frame",track,{AnchorPoint=Vector2.new(.5,.5),Position=UDim2.fromScale(0,.5),Size=UDim2.fromOffset(5,10),BackgroundColor3=accent,BorderSizePixel=0}); round(knob)
   local function update(x)
    if track.AbsoluteSize.X<=0 then return end
    local ratio=math.clamp((x-track.AbsolutePosition.X)/track.AbsoluteSize.X,0,1)
@@ -157,8 +177,9 @@ connect(Input.InputEnded,function(input)
 end)
 connect(Input.WindowFocusReleased,function() activeSlider=nil end)
 for _,option in {{"ESP","Activer l'ESP"},{"Outline","Contour de silhouette"},{"Skeleton","Squelette"},{"Names","Noms des joueurs"},{"Health","Barre de vie coloree"},{"Distance","Distance"},{"Circle","Cercle de selection"}} do setting("Affichage",option[1],option[2]) end
-setting("Affichage","MaxESP","Personnages affiches",{8,16,24})
-setting("Affichage","SkeletonFPS","Fluidite du squelette",{10,20,30}," Hz")
+setting("Affichage","Range","Distance maximale",{150,300,600,1000,3000}," studs")
+setting("Affichage","HealthThickness","Epaisseur barre de vie",{3,5,8,12}," px")
+setting("Affichage","HealthNumbers","Points de vie restants",nil,nil,"right")
 setting("Visee","Aim","Activer la visee")
 setting("Visee","Sticky","Conserver la cible")
 setting("Visee","ThroughWalls","Viser a travers les murs")
@@ -184,9 +205,9 @@ note(columns.Cibles.right,"Les PNJ sont les modeles avec un Humanoid.\n\nPour un
 note(columns.Reglages.left,"RACCOURCIS\n\nClic droit maintenu : viser\nInser : ouvrir / fermer\nEn-tete : deplacer le menu\n\nPour alleger l'affichage : 8 personnages et squelette a 10 Hz.",160)
 local reset=make("TextButton",columns.Reglages.left,{Size=UDim2.new(1,0,0,38),Text="Retablir les reglages",BackgroundColor3=rowColor,TextColor3=accent,TextSize=11,Font=Enum.Font.GothamBold,BorderSizePixel=0}); round(reset)
 connect(reset.Activated,function() config=table.clone(defaults); locked=nil; refreshAll() end)
-local status=label(panel,"En attente",UDim2.new(0,174,1,-53),UDim2.new(1,-192,0,22)); status.TextSize=11; status.TextColor3=accent
-local footer=label(panel,"CLIC DROIT : VISER     /     INSER : MENU",UDim2.new(0,174,1,-28),UDim2.new(1,-192,0,18)); footer.TextSize=10; footer.TextColor3=muted
-local sideFooter=label(sidebar,"R1 / CONTROL\nJoueurs & PNJ",UDim2.new(0,20,1,-57),UDim2.new(1,-32,0,40)); sideFooter.TextSize=10; sideFooter.TextColor3=muted
+local status=label(panel,"En attente",UDim2.new(0,166,1,-43),UDim2.new(1,-192,0,22)); status.TextSize=11; status.TextColor3=accent
+local footer=label(panel,"CLIC DROIT : VISER     /     INSER : MENU",UDim2.new(0,166,1,-21),UDim2.new(1,-192,0,18)); footer.TextSize=10; footer.TextColor3=muted
+local sideFooter=label(sidebar,"INS   Menu\nCLIC DROIT   Visee",UDim2.new(0,20,1,-57),UDim2.new(1,-32,0,40)); sideFooter.TextSize=10; sideFooter.TextColor3=muted
 local dragStart,panelStart,dragging=nil,nil,false
 connect(header.InputBegan,function(input)
  if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then dragStart=input.Position; panelStart=panel.Position; dragging=true end
@@ -327,7 +348,7 @@ local function allocateVisuals(r)
  make("UIStroke",r.healthBar,{Color=Color3.fromRGB(8,9,12),Thickness=1})
  r.healthFill=make("Frame",r.healthBar,{Size=UDim2.fromScale(1,1),BackgroundColor3=Color3.fromRGB(65,235,120),BorderSizePixel=0})
  make("UICorner",r.healthFill,{CornerRadius=UDim.new(0,4)})
- r.healthValue=label(r.healthBar,"",UDim2.new(),UDim2.fromScale(1,1))
+ r.healthValue=label(r.info,"",UDim2.new(.5,-70,1,-29),UDim2.fromOffset(140,12))
  r.healthValue.TextXAlignment=Enum.TextXAlignment.Center; r.healthValue.TextSize=10
  r.healthValue.Font=Enum.Font.GothamBold; r.healthValue.TextStrokeTransparency=.35; r.healthValue.ZIndex=2
 end
@@ -472,6 +493,10 @@ local function scan(camera)
   r.info.Adornee=r.head or r.displayPart
   r.info.Enabled=config.Names or config.Health or config.Distance
   r.healthBar.Visible=config.Health
+  r.healthValue.Visible=config.Health and config.HealthNumbers
+  r.healthBar.Size=UDim2.fromOffset(140,config.HealthThickness)
+  r.healthValue.Position=UDim2.new(.5,-70,1,-config.HealthThickness-17)
+  r.text.Size=UDim2.new(1,0,1,-config.HealthThickness-(config.HealthNumbers and 20 or 7))
   if config.Health then
    local maximum=math.max(0,r.humanoid.MaxHealth)
    local health=math.clamp(r.humanoid.Health,0,maximum)
