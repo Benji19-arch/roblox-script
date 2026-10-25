@@ -10,7 +10,7 @@ local defaults = {
  Aim=true, Bots=true, TargetPlayers=true, TeamCheck=true, ThroughWalls=true,
  Sticky=true, ESP=true, Outline=true, Skeleton=true, Names=true, Health=true, HealthNumbers=true, HealthThickness=3, Distance=true,
  Circle=true, Fov=160, Smooth=12, Range=1000, Part="Head",
- Activation="Maintenir", Tracking="Direct", MaxESP=16, SkeletonFPS=20,
+ Activation="Maintenir", Tracking="Direct", CenterCharacter=true, RotateCharacter=true, AimDistance=8, MaxESP=16, SkeletonFPS=20,
 }
 local config = table.clone(defaults)
 local records, connections, refreshers = {}, {}, {}
@@ -182,12 +182,15 @@ setting("Affichage","HealthThickness","Epaisseur barre de vie",{3,5,8,12}," px")
 setting("Affichage","HealthNumbers","Points de vie restants",nil,nil,"right")
 setting("Visee","Aim","Activer la visee")
 setting("Visee","Sticky","Conserver la cible")
+setting("Visee","CenterCharacter","Personnage centre")
+setting("Visee","RotateCharacter","Tourner vers la cible")
 setting("Visee","ThroughWalls","Viser a travers les murs")
 setting("Visee","Activation","Activation",{"Maintenir","Permanent"})
 setting("Visee","Part","Point de visee",{"Head","HumanoidRootPart"})
 setting("Visee","Tracking","Suivi de la cible",{"Direct","Fluide"})
 setting("Visee","Fov","Rayon de selection",{60,100,160,240,320}," px")
 setting("Visee","Smooth","Reactivite du suivi fluide",{4,8,12,20,32})
+setting("Visee","AimDistance","Recul de camera",{4,6,8,12,16}," studs")
 setting("Cibles","TargetPlayers","Joueurs")
 setting("Cibles","Bots","Bots / PNJ")
 setting("Cibles","TeamCheck","Ignorer les allies")
@@ -523,7 +526,7 @@ end
 local shortlist={}
 local blockedSince,aimBlocked=nil,false
 local lastAimRotation,lastAimRecord,lastAimCamera=nil,nil,nil
--- Une seule camera ecrit la position pendant le verrouillage.
+-- Camera centree derriere le personnage et rotation du corps pendant la visee.
 local cameraControl=nil
 local collisionParams=RaycastParams.new()
 collisionParams.FilterType=Enum.RaycastFilterType.Exclude
@@ -533,32 +536,59 @@ local collisionFilter={}
 local function releaseCamera()
  local control=cameraControl
  cameraControl=nil
- if control and control.camera.Parent and control.camera.CameraType==Enum.CameraType.Scriptable then
-  control.camera.CameraType=control.originalType
-  control.camera.Focus=control.originalFocus
+ if control then
+  if control.bodyOwned and control.humanoid.Parent then control.humanoid.AutoRotate=control.originalAutoRotate end
+  if control.camera.Parent and control.camera.CameraType==Enum.CameraType.Scriptable then
+   control.camera.CameraType=control.originalType
+   control.camera.Focus=control.originalFocus
+  end
  end
  lastAimRotation=nil; lastAimRecord=nil; lastAimCamera=nil
 end
-local function controlledPosition(camera)
- if cameraControl and (cameraControl.camera~=camera or cameraControl.root~=localRoot) then releaseCamera() end
- if not cameraControl then
-  cameraControl={camera=camera,root=localRoot,originalType=camera.CameraType,
-   originalFocus=camera.Focus,offset=camera.CFrame.Position-localRoot.Position}
- end
- camera.CameraType=Enum.CameraType.Scriptable
- -- Suivre la translation du joueur sans reprendre la rotation concurrente du controleur Roblox.
- local position=localRoot.Position+cameraControl.offset
- local head=localCharacter and partOf(localCharacter,"Head")
- local pivot=head and head.Position or localRoot.Position+Vector3.new(0,1.5,0)
+local function characterPivot()
+ -- Hauteur stable pour ne pas faire osciller la camera avec les animations de tete.
+ return localRoot.Position+Vector3.new(0,localRoot.Size.Y*.75,0)
+end
+local function collisionSafe(camera,pivot,position)
  local direction=position-pivot
- if direction.Magnitude>0.5 then
-  table.clear(collisionFilter)
-  table.insert(collisionFilter,localCharacter); table.insert(collisionFilter,camera)
-  collisionParams.FilterDescendantsInstances=collisionFilter
-  local hit=workspace:Raycast(pivot,direction,collisionParams)
-  if hit then position=hit.Position+hit.Normal*0.25 end
+ if direction.Magnitude<=.5 then return position end
+ table.clear(collisionFilter)
+ table.insert(collisionFilter,localCharacter); table.insert(collisionFilter,camera)
+ collisionParams.FilterDescendantsInstances=collisionFilter
+ local hit=workspace:Raycast(pivot,direction,collisionParams)
+ if hit then
+  -- Raccourcir le recul sur le meme axe garde le personnage centre.
+  return pivot+direction.Unit*math.max(.05,hit.Distance-.25)
  end
  return position
+end
+local function controlledPosition(camera)
+ if cameraControl and (cameraControl.camera~=camera or cameraControl.root~=localRoot or cameraControl.humanoid~=localHumanoid) then releaseCamera() end
+ if not cameraControl then
+  cameraControl={camera=camera,root=localRoot,humanoid=localHumanoid,
+   originalType=camera.CameraType,originalFocus=camera.Focus,
+   originalAutoRotate=localHumanoid.AutoRotate,bodyOwned=false,
+   offset=camera.CFrame.Position-localRoot.Position}
+ end
+ camera.CameraType=Enum.CameraType.Scriptable
+ local pivot=characterPivot()
+ if config.CenterCharacter then return pivot end
+ return collisionSafe(camera,pivot,localRoot.Position+cameraControl.offset)
+end
+local function followAimWithBody(rotation)
+ local control=cameraControl
+ if not control then return end
+ if config.RotateCharacter and not localHumanoid.Sit and not localHumanoid.PlatformStand then
+  local direction=Vector3.new(rotation.LookVector.X,0,rotation.LookVector.Z)
+  if direction.Magnitude>.001 then
+   localHumanoid.AutoRotate=false; control.bodyOwned=true
+   -- Ne modifier que l'orientation horizontale, sans deplacer le personnage.
+   local position=localRoot.Position
+   localRoot.CFrame=CFrame.lookAt(position,position+direction.Unit)
+  end
+ elseif control.bodyOwned then
+  localHumanoid.AutoRotate=control.originalAutoRotate; control.bodyOwned=false
+ end
 end
 connect(Input.WindowFocusReleased,releaseCamera)
 connect(player.CharacterRemoving,function() locked=nil; releaseCamera() end)
@@ -650,8 +680,13 @@ RunService:BindToRenderStep(binding,Enum.RenderPriority.Last.Value,function(dt)
      end
     end
     -- Pendant une obstruction breve, conserver la direction sans suivre a travers le mur.
+    followAimWithBody(lastAimRotation)
+    local pivot=characterPivot()
+    if config.CenterCharacter then
+     position=collisionSafe(camera,pivot,pivot-lastAimRotation.LookVector*config.AimDistance)
+    end
     camera.CFrame=CFrame.new(position)*lastAimRotation
-    camera.Focus=CFrame.new(targetPosition)
+    camera.Focus=CFrame.new(config.CenterCharacter and pivot or targetPosition)
    else
     releaseCamera()
    end
