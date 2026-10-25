@@ -392,6 +392,46 @@ end
 local shortlist={}
 local blockedSince,aimBlocked=nil,false
 local lastAimRotation,lastAimRecord,lastAimCamera=nil,nil,nil
+-- Une seule camera ecrit la position pendant le verrouillage.
+local cameraControl=nil
+local collisionParams=RaycastParams.new()
+collisionParams.FilterType=Enum.RaycastFilterType.Exclude
+collisionParams.IgnoreWater=true
+collisionParams.RespectCanCollide=true
+local collisionFilter={}
+local function releaseCamera()
+ local control=cameraControl
+ cameraControl=nil
+ if control and control.camera.Parent and control.camera.CameraType==Enum.CameraType.Scriptable then
+  control.camera.CameraType=control.originalType
+  control.camera.Focus=control.originalFocus
+ end
+ lastAimRotation=nil; lastAimRecord=nil; lastAimCamera=nil
+end
+local function controlledPosition(camera)
+ if cameraControl and (cameraControl.camera~=camera or cameraControl.root~=localRoot) then releaseCamera() end
+ if not cameraControl then
+  cameraControl={camera=camera,root=localRoot,originalType=camera.CameraType,
+   originalFocus=camera.Focus,offset=camera.CFrame.Position-localRoot.Position}
+ end
+ camera.CameraType=Enum.CameraType.Scriptable
+ -- Suivre la translation du joueur sans reprendre la rotation concurrente du controleur Roblox.
+ local position=localRoot.Position+cameraControl.offset
+ local head=localCharacter and partOf(localCharacter,"Head")
+ local pivot=head and head.Position or localRoot.Position+Vector3.new(0,1.5,0)
+ local direction=position-pivot
+ if direction.Magnitude>0.5 then
+  table.clear(collisionFilter)
+  table.insert(collisionFilter,localCharacter); table.insert(collisionFilter,camera)
+  collisionParams.FilterDescendantsInstances=collisionFilter
+  local hit=workspace:Raycast(pivot,direction,collisionParams)
+  if hit then position=hit.Position+hit.Normal*0.25 end
+ end
+ return position
+end
+connect(Input.WindowFocusReleased,releaseCamera)
+connect(player.CharacterRemoving,function() locked=nil; releaseCamera() end)
+connect(workspace:GetPropertyChangedSignal("CurrentCamera"),releaseCamera)
 local function acquire(camera)
  -- Le rayon sert a choisir une cible, pas a changer de personnage pendant le suivi.
  if config.Sticky and valid(locked) then
@@ -450,16 +490,17 @@ end)
 RunService:BindToRenderStep(binding,Enum.RenderPriority.Last.Value,function(dt)
  if stopped then return end
  local camera=workspace.CurrentCamera
- if not camera then return end
+ if not camera then releaseCamera(); return end
  -- Lecture directe : le clic droit reste detecte meme s'il est consomme par la camera Roblox.
  aiming=focused and config.Aim and not Input:GetFocusedTextBox()
   and (config.Activation=="Permanent" or rightHeld or Input:IsMouseButtonPressed(Enum.UserInputType.MouseButton2))
  local canAim=aiming and localHumanoid and localHumanoid.Health>0
+  and localCharacter==player.Character and localRoot and localRoot:IsDescendantOf(workspace)
  aimClock+=dt
  if canAim then
   if aimClock>=AIM_INTERVAL then aimClock=0; acquire(camera) end
   if valid(locked) then
-   local position=camera.CFrame.Position
+   local position=controlledPosition(camera)
    local targetPosition=locked.aimPart.Position
    if (targetPosition-position).Magnitude>.001 then
     local desired=CFrame.lookAt(position,targetPosition).Rotation
@@ -479,13 +520,16 @@ RunService:BindToRenderStep(binding,Enum.RenderPriority.Last.Value,function(dt)
     end
     -- Pendant une obstruction breve, conserver la direction sans suivre a travers le mur.
     camera.CFrame=CFrame.new(position)*lastAimRotation
+    camera.Focus=CFrame.new(targetPosition)
+   else
+    releaseCamera()
    end
   else
-   locked=nil; lastAimRotation=nil; lastAimRecord=nil
+   locked=nil; releaseCamera()
   end
  else
   locked=nil; aimClock=AIM_INTERVAL; aimBlocked=false; blockedSince=nil
-  lastAimRotation=nil; lastAimRecord=nil; lastAimCamera=nil
+  releaseCamera()
  end
  boneClock+=dt
  if boneClock>=1/config.SkeletonFPS then
@@ -495,7 +539,7 @@ RunService:BindToRenderStep(binding,Enum.RenderPriority.Last.Value,function(dt)
 end)
 local function cleanup()
  if stopped then return end
- stopped=true; RunService:UnbindFromRenderStep(binding)
+ stopped=true; releaseCamera(); RunService:UnbindFromRenderStep(binding)
  for _,c in connections do c:Disconnect() end
  for model in records do remove(model) end
  gui:Destroy()
