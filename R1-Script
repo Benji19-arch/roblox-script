@@ -1,12 +1,13 @@
 -- LocalScript : StarterPlayer > StarterPlayerScripts
 -- Clic droit maintenu : viser | Inser : menu
 -- PNJ allies : attribut Friendly=true ou TeamName=nom de votre equipe.
+-- ThroughWalls : visee a travers les murs ; la couleur ESP reste basee sur la visibilite.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Input = game:GetService("UserInputService")
 local player = Players.LocalPlayer
 local defaults = {
- Aim=true, Bots=true, TargetPlayers=true, TeamCheck=true, WallCheck=true,
+ Aim=true, Bots=true, TargetPlayers=true, TeamCheck=true, ThroughWalls=true,
  Sticky=true, ESP=true, Outline=true, Skeleton=true, Names=true, Health=true, Distance=true,
  Circle=true, Fov=160, Smooth=12, Range=1000, Part="Head",
  Activation="Maintenir", Tracking="Direct", MaxESP=16, SkeletonFPS=20,
@@ -23,9 +24,9 @@ local function make(class,parent,props)
  for k,v in props do obj[k]=v end
  obj.Parent=parent; return obj
 end
-local bg=Color3.fromRGB(18,22,32)
-local card=Color3.fromRGB(31,38,52)
-local accent=Color3.fromRGB(75,220,185)
+local bg=Color3.fromRGB(21,22,27)
+local card=Color3.fromRGB(27,28,34)
+local accent=Color3.fromRGB(217,45,174)
 local white=Color3.fromRGB(235,242,255)
 local function round(obj) make("UICorner",obj,{CornerRadius=UDim.new(0,9)}) end
 local function label(parent,value,pos,size)
@@ -44,74 +45,162 @@ local shutdown=make("BindableEvent",gui,{Name="Shutdown"})
 local circle=make("Frame",gui,{BackgroundTransparency=1,AnchorPoint=Vector2.new(.5,.5)})
 make("UICorner",circle,{CornerRadius=UDim.new(1,0)})
 local stroke=make("UIStroke",circle,{Color=accent,Thickness=1.5,Transparency=.25})
-local panel=make("Frame",gui,{Name="Panel",Position=UDim2.fromOffset(18,64),Size=UDim2.fromOffset(500,470),BackgroundColor3=bg,BorderSizePixel=0})
-panel.ZIndex=5
+local panel=make("Frame",gui,{Name="Panel",Position=UDim2.fromOffset(18,64),Size=UDim2.fromOffset(760,520),BackgroundColor3=bg,BorderSizePixel=0,ZIndex=5})
 round(panel)
-make("UIStroke",panel,{Color=card,Thickness=1})
+make("UIStroke",panel,{Color=Color3.fromRGB(58,59,69),Thickness=1})
 local scale=make("UIScale",panel,{Scale=1})
-label(panel,"STUDIO / ASSISTANCE",UDim2.fromOffset(18,14),UDim2.new(1,-36,0,28)).Font=Enum.Font.GothamBold
-label(panel,"Joueurs & PNJ - Reglages en temps reel",UDim2.fromOffset(18,42),UDim2.new(1,-36,0,22)).TextTransparency=.3
-local menu=make("TextButton",gui,{Name="Menu",Position=UDim2.fromOffset(18,18),Size=UDim2.fromOffset(140,34),Text="VISEE / MENU",BackgroundColor3=accent,TextColor3=bg,TextSize=12,Font=Enum.Font.GothamBold,BorderSizePixel=0})
-menu.ZIndex=6
-round(menu)
-connect(menu.Activated,function() panel.Visible=not panel.Visible; aiming=false; locked=nil end)
-local pages,buttons={},{}
+local muted=Color3.fromRGB(145,148,163)
+local rowColor=Color3.fromRGB(33,34,41)
+local sidebar=make("Frame",panel,{Size=UDim2.new(0,155,1,0),BackgroundColor3=Color3.fromRGB(17,18,23),BorderSizePixel=0})
+round(sidebar)
+local brand=label(sidebar,"R1",UDim2.fromOffset(20,17),UDim2.fromOffset(110,30))
+brand.TextSize=25; brand.Font=Enum.Font.GothamBold; brand.TextColor3=accent
+label(sidebar,"CONTROL PANEL",UDim2.fromOffset(21,49),UDim2.fromOffset(125,18)).TextSize=10
+local header=make("Frame",panel,{Position=UDim2.fromOffset(155,0),Size=UDim2.new(1,-155,0,80),BackgroundTransparency=1,Active=true})
+local heading=label(header,"Visuels",UDim2.fromOffset(22,15),UDim2.new(1,-80,0,26))
+heading.TextSize=21; heading.Font=Enum.Font.GothamBold
+local subtitle=label(header,"",UDim2.fromOffset(22,45),UDim2.new(1,-64,0,22))
+subtitle.TextSize=11; subtitle.TextColor3=muted
+local close=make("TextButton",header,{Position=UDim2.new(1,-46,0,20),Size=UDim2.fromOffset(28,28),Text="X",TextSize=13,Font=Enum.Font.GothamBold,BackgroundColor3=card,TextColor3=muted,BorderSizePixel=0})
+round(close)
+connect(close.Activated,function() panel.Visible=false end)
+local menu=make("TextButton",gui,{Name="Menu",Position=UDim2.fromOffset(18,18),Size=UDim2.fromOffset(124,32),Text="R1 / MENU",TextSize=12,Font=Enum.Font.GothamBold,BackgroundColor3=bg,TextColor3=accent,BorderSizePixel=0,ZIndex=6})
+round(menu); make("UIStroke",menu,{Color=accent,Thickness=1})
+connect(menu.Activated,function() panel.Visible=not panel.Visible end)
+local pages,buttons,indicators,columns={},{},{},{}
+local titles={Affichage="Visuels",Visee="Visee",Cibles="Cibles",Reglages="Reglages"}
+local descriptions={Affichage="Silhouette, squelette et informations des personnages",Visee="Activation, suivi de la tete et obstacles",Cibles="Choisis les joueurs et les PNJ a suivre",Reglages="Performances, raccourcis et reinitialisation"}
 local function selectTab(name)
- for title,page in pages do
-  page.Visible=title==name
-  buttons[title].BackgroundColor3=title==name and accent or card
-  buttons[title].TextColor3=title==name and bg or white
+ heading.Text=titles[name]; subtitle.Text=descriptions[name]
+ for key,page in pages do
+  local selected=key==name
+  page.Visible=selected; indicators[key].Visible=selected
+  buttons[key].BackgroundColor3=selected and Color3.fromRGB(53,29,49) or sidebar.BackgroundColor3
+  buttons[key].TextColor3=selected and accent or muted
  end
 end
-for i,name in {"Visee","Cibles","Affichage","Reglages"} do
- local b=make("TextButton",panel,{Position=UDim2.new((i-1)*.25,16,0,80),Size=UDim2.new(.25,-20,0,34),Text=name,BackgroundColor3=card,TextColor3=white,TextSize=12,Font=Enum.Font.GothamBold,BorderSizePixel=0})
- round(b)
- local page=make("ScrollingFrame",panel,{Name=name,Position=UDim2.fromOffset(16,128),Size=UDim2.new(1,-32,1,-190),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=3,ScrollBarImageColor3=accent,CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,Visible=false})
- make("UIListLayout",page,{Padding=UDim.new(0,8),SortOrder=Enum.SortOrder.LayoutOrder})
- make("UIPadding",page,{PaddingRight=UDim.new(0,6),PaddingBottom=UDim.new(0,8)})
- pages[name],buttons[name]=page,b
+local function column(parent,x,title)
+ local scroll=make("ScrollingFrame",parent,{Position=UDim2.new(x,0,0,0),Size=UDim2.new(.5,-6,1,0),BackgroundColor3=card,BorderSizePixel=0,ScrollBarThickness=3,ScrollBarImageColor3=accent,CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y})
+ round(scroll)
+ make("UIPadding",scroll,{PaddingTop=UDim.new(0,12),PaddingBottom=UDim.new(0,12),PaddingLeft=UDim.new(0,10),PaddingRight=UDim.new(0,10)})
+ make("UIListLayout",scroll,{Padding=UDim.new(0,8),SortOrder=Enum.SortOrder.LayoutOrder})
+ local caption=label(scroll,title,UDim2.new(),UDim2.new(1,0,0,24)); caption.Font=Enum.Font.GothamBold; caption.TextSize=12
+ return scroll
+end
+for index,name in {"Affichage","Visee","Cibles","Reglages"} do
+ local b=make("TextButton",sidebar,{Position=UDim2.fromOffset(12,95+(index-1)*47),Size=UDim2.fromOffset(131,39),Text=string.format("0%d   %s",index,titles[name]),TextXAlignment=Enum.TextXAlignment.Left,TextSize=13,Font=Enum.Font.GothamMedium,BackgroundColor3=sidebar.BackgroundColor3,TextColor3=muted,BorderSizePixel=0,AutoButtonColor=false})
+ round(b); make("UIPadding",b,{PaddingLeft=UDim.new(0,12)})
+ local marker=make("Frame",b,{Position=UDim2.fromOffset(0,10),Size=UDim2.fromOffset(3,19),BackgroundColor3=accent,BorderSizePixel=0})
+ local page=make("Frame",panel,{Name=name,Position=UDim2.fromOffset(172,89),Size=UDim2.new(1,-190,1,-151),BackgroundTransparency=1,Visible=false})
+ pages[name],buttons[name],indicators[name]=page,b,marker
+ columns[name]={left=column(page,0,"OPTIONS"),right=column(page,.5,"REGLAGES")}
  connect(b.Activated,function() selectTab(name) end)
 end
-local function setting(page,key,title,values,suffix)
- local row=make("Frame",pages[page],{Size=UDim2.new(1,0,0,42),BackgroundColor3=card,BorderSizePixel=0}); round(row)
- label(row,title,UDim2.fromOffset(10,0),UDim2.new(1,-150,1,0))
- local b=make("TextButton",row,{Position=UDim2.new(1,-138,0,6),Size=UDim2.fromOffset(128,30),BackgroundColor3=bg,TextColor3=accent,TextSize=12,Font=Enum.Font.GothamBold,BorderSizePixel=0}); round(b)
- local function refresh()
-  local v=config[key]
-  if typeof(v)=="boolean" then b.Text=v and "ACTIVE" or "DESACTIVE"
-  else b.Text=tostring(v)..(suffix or "") end
-  b.TextColor3=v==false and Color3.fromRGB(150,160,180) or accent
- end
- table.insert(refreshers,refresh)
- connect(b.Activated,function()
-  if values then config[key]=values[((table.find(values,config[key]) or 0)%#values)+1]
-  else config[key]=not config[key] end
-  locked=nil; refresh()
- end)
- refresh()
+local activeSlider=nil
+local function refreshAll() for _,refresh in refreshers do refresh() end end
+local function changed(key,value)
+ if config[key]==value then return end
+ config[key]=value; locked=nil; refreshAll()
 end
-setting("Visee","Aim","Assistance a la visee")
+local displayValues={Head="Tete",HumanoidRootPart="Torse",Maintenir="Clic droit maintenu",Permanent="Toujours active",Direct="Direct",Fluide="Fluide"}
+local function setting(page,key,title,values,suffix)
+ local numeric=values and typeof(values[1])=="number"
+ local parent=values and columns[page].right or columns[page].left
+ local row=make("Frame",parent,{Size=UDim2.new(1,0,0,values and 66 or 50),BackgroundColor3=rowColor,BorderSizePixel=0}); round(row)
+ local caption=label(row,title,UDim2.fromOffset(10,5),UDim2.new(1,values and -20 or -70,0,20)); caption.TextSize=11
+ if not values then
+  local state=label(row,"",UDim2.fromOffset(10,26),UDim2.new(1,-70,0,14)); state.TextSize=10
+  local toggle=make("TextButton",row,{Position=UDim2.new(1,-52,0,14),Size=UDim2.fromOffset(42,22),Text="",BorderSizePixel=0,AutoButtonColor=false})
+  round(toggle)
+  local knob=make("Frame",toggle,{Position=UDim2.fromOffset(3,3),Size=UDim2.fromOffset(16,16),BackgroundColor3=white,BorderSizePixel=0}); round(knob)
+  local function refresh()
+   local enabled=config[key]
+   toggle.BackgroundColor3=enabled and accent or Color3.fromRGB(66,67,78)
+   knob.Position=UDim2.fromOffset(enabled and 23 or 3,3)
+   state.Text=enabled and "Active" or "Desactive"; state.TextColor3=enabled and accent or muted
+  end
+  table.insert(refreshers,refresh); connect(toggle.Activated,function() changed(key,not config[key]) end); refresh()
+ elseif numeric then
+  local value=label(row,"",UDim2.fromOffset(10,25),UDim2.new(1,-20,0,16)); value.TextSize=11; value.TextColor3=accent
+  local track=make("TextButton",row,{Position=UDim2.fromOffset(12,44),Size=UDim2.new(1,-24,0,16),BackgroundTransparency=1,Text="",AutoButtonColor=false})
+  local rail=make("Frame",track,{Position=UDim2.new(0,0,.5,-2),Size=UDim2.new(1,0,0,4),BackgroundColor3=Color3.fromRGB(63,64,76),BorderSizePixel=0}); round(rail)
+  local fill=make("Frame",rail,{Size=UDim2.fromScale(0,1),BackgroundColor3=accent,BorderSizePixel=0}); round(fill)
+  local knob=make("Frame",track,{AnchorPoint=Vector2.new(.5,.5),Position=UDim2.fromScale(0,.5),Size=UDim2.fromOffset(10,10),BackgroundColor3=white,BorderSizePixel=0}); round(knob)
+  local function update(x)
+   if track.AbsoluteSize.X<=0 then return end
+   local ratio=math.clamp((x-track.AbsolutePosition.X)/track.AbsoluteSize.X,0,1)
+   local index=math.floor(ratio*(#values-1)+.5)+1
+   changed(key,values[index])
+  end
+  local function refresh()
+   local index=table.find(values,config[key]) or 1
+   local ratio=(index-1)/math.max(1,#values-1)
+   value.Text=tostring(config[key])..(suffix or ""); fill.Size=UDim2.fromScale(ratio,1); knob.Position=UDim2.fromScale(ratio,.5)
+  end
+  table.insert(refreshers,refresh)
+  connect(track.InputBegan,function(input)
+   if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then activeSlider=update; update(input.Position.X) end
+  end)
+  refresh()
+ else
+  local button=make("TextButton",row,{Position=UDim2.fromOffset(10,31),Size=UDim2.new(1,-20,0,26),TextSize=11,Font=Enum.Font.GothamMedium,TextColor3=accent,BackgroundColor3=bg,BorderSizePixel=0}); round(button)
+  local function refresh() button.Text=(displayValues[config[key]] or tostring(config[key])).."  >" end
+  table.insert(refreshers,refresh)
+  connect(button.Activated,function() changed(key,values[(table.find(values,config[key]) or 0)%#values+1]) end); refresh()
+ end
+end
+connect(Input.InputChanged,function(input)
+ if activeSlider and (input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch) then activeSlider(input.Position.X) end
+end)
+connect(Input.InputEnded,function(input)
+ if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then activeSlider=nil end
+end)
+connect(Input.WindowFocusReleased,function() activeSlider=nil end)
+for _,option in {{"ESP","Activer l'ESP"},{"Outline","Contour de silhouette"},{"Skeleton","Squelette"},{"Names","Noms des joueurs"},{"Health","Barre de vie coloree"},{"Distance","Distance"},{"Circle","Cercle de selection"}} do setting("Affichage",option[1],option[2]) end
+setting("Affichage","MaxESP","Personnages affiches",{8,16,24})
+setting("Affichage","SkeletonFPS","Fluidite du squelette",{10,20,30}," Hz")
+setting("Visee","Aim","Activer la visee")
+setting("Visee","Sticky","Conserver la cible")
+setting("Visee","ThroughWalls","Viser a travers les murs")
 setting("Visee","Activation","Activation",{"Maintenir","Permanent"})
-setting("Visee","Part","Point vise",{"Head","HumanoidRootPart"})
+setting("Visee","Part","Point de visee",{"Head","HumanoidRootPart"})
 setting("Visee","Tracking","Suivi de la cible",{"Direct","Fluide"})
 setting("Visee","Fov","Rayon de selection",{60,100,160,240,320}," px")
-setting("Visee","Smooth","Reactivite (+ = rapide)",{4,8,12,20,32})
-setting("Visee","Sticky","Conserver la cible")
-setting("Visee","WallCheck","Verifier les obstacles")
-setting("Cibles","TargetPlayers","Viser les joueurs")
-setting("Cibles","Bots","Viser les bots / PNJ")
+setting("Visee","Smooth","Reactivite du suivi fluide",{4,8,12,20,32})
+setting("Cibles","TargetPlayers","Joueurs")
+setting("Cibles","Bots","Bots / PNJ")
 setting("Cibles","TeamCheck","Ignorer les allies")
-setting("Cibles","Range","Portee maximale",{150,300,600,1000,3000}," studs")
-for _,item in {{"ESP","Activer ESP"},{"Outline","Contour de silhouette"},{"Skeleton","Squelette"},{"Names","Noms des joueurs"},{"Health","Points de vie"},{"Distance","Distance"},{"Circle","Cercle de visee"}} do setting("Affichage",item[1],item[2]) end
-setting("Reglages","MaxESP","Personnages ESP max",{8,16,24})
-setting("Reglages","SkeletonFPS","Fluidite du squelette",{10,20,30}," Hz")
-local help=label(pages.Reglages,"Clic droit maintenu : viser\nInser ou MENU : afficher / masquer\n\nBots : modeles avec un Humanoid.\nPNJ allies : Friendly=true ou TeamName.\nVert : visible / Rouge : cache.\n\nClique sur les valeurs pour les changer.",UDim2.new(),UDim2.new(1,0,0,180))
-help.TextWrapped=true; help.TextYAlignment=Enum.TextYAlignment.Top
-local reset=make("TextButton",pages.Reglages,{Size=UDim2.new(1,0,0,40),Text="Retablir les reglages",BackgroundColor3=card,TextColor3=accent,TextSize=13,BorderSizePixel=0}); round(reset)
-connect(reset.Activated,function() config=table.clone(defaults); locked=nil; for _,f in refreshers do f() end end)
-local status=label(panel,"En attente",UDim2.new(0,18,1,-52),UDim2.new(1,-36,0,22)); status.TextColor3=accent
-label(panel,"CLIC DROIT : VISER / INSER : MENU",UDim2.new(0,18,1,-28),UDim2.new(1,-36,0,18)).TextSize=10
-selectTab("Visee")
+setting("Cibles","Range","Distance maximale",{150,300,600,1000,3000}," studs")
+setting("Reglages","MaxESP","Limite des visuels",{8,16,24})
+setting("Reglages","SkeletonFPS","Frequence du squelette",{10,20,30}," Hz")
+local function note(parent,message,height)
+ local item=label(parent,message,UDim2.new(),UDim2.new(1,0,0,height))
+ item.TextSize=11; item.TextColor3=muted; item.TextWrapped=true; item.TextYAlignment=Enum.TextYAlignment.Top
+ return item
+end
+note(columns.Affichage.right,"VERT : personnage visible\nROUGE : personnage cache\n\nLa barre de vie passe du rouge au vert selon les points de vie. Les noms des bots sont masques.",116)
+note(columns.Visee.left,"La visee reste sur la cible derriere les murs si l'option est activee. Cela ne modifie pas les collisions des tirs du jeu.",88)
+note(columns.Cibles.right,"Les PNJ sont les modeles avec un Humanoid.\n\nPour un PNJ allie : Friendly = true ou TeamName = nom de ton equipe.",110)
+note(columns.Reglages.left,"RACCOURCIS\n\nClic droit maintenu : viser\nInser : ouvrir / fermer\nEn-tete : deplacer le menu\n\nPour alleger l'affichage : 8 personnages et squelette a 10 Hz.",160)
+local reset=make("TextButton",columns.Reglages.left,{Size=UDim2.new(1,0,0,38),Text="Retablir les reglages",BackgroundColor3=rowColor,TextColor3=accent,TextSize=11,Font=Enum.Font.GothamBold,BorderSizePixel=0}); round(reset)
+connect(reset.Activated,function() config=table.clone(defaults); locked=nil; refreshAll() end)
+local status=label(panel,"En attente",UDim2.new(0,174,1,-53),UDim2.new(1,-192,0,22)); status.TextSize=11; status.TextColor3=accent
+local footer=label(panel,"CLIC DROIT : VISER     /     INSER : MENU",UDim2.new(0,174,1,-28),UDim2.new(1,-192,0,18)); footer.TextSize=10; footer.TextColor3=muted
+local sideFooter=label(sidebar,"R1 / CONTROL\nJoueurs & PNJ",UDim2.new(0,20,1,-57),UDim2.new(1,-32,0,40)); sideFooter.TextSize=10; sideFooter.TextColor3=muted
+local dragStart,panelStart,dragging=nil,nil,false
+connect(header.InputBegan,function(input)
+ if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then dragStart=input.Position; panelStart=panel.Position; dragging=true end
+end)
+connect(Input.InputChanged,function(input)
+ if not dragging or not panel.Visible then return end
+ if input.UserInputType~=Enum.UserInputType.MouseMovement and input.UserInputType~=Enum.UserInputType.Touch then return end
+ local camera=workspace.CurrentCamera; if not camera then return end
+ local delta=input.Position-dragStart
+ panel.Position=UDim2.fromOffset(math.clamp(panelStart.X.Offset+delta.X,0,math.max(0,camera.ViewportSize.X-panel.AbsoluteSize.X)),math.clamp(panelStart.Y.Offset+delta.Y,0,math.max(0,camera.ViewportSize.Y-panel.AbsoluteSize.Y)))
+end)
+connect(Input.InputEnded,function(input) if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then dragging=false end end)
+connect(Input.WindowFocusReleased,function() dragging=false end)
+selectTab("Affichage")
 -- Travail espace dans le temps : registre 10 Hz, visee 12,5 Hz, squelette 20 Hz.
 -- Seul le mouvement de camera est applique a chaque image.
 local SCAN_INTERVAL, AIM_INTERVAL = 0.1, 0.08
@@ -124,7 +213,7 @@ local visibilityCursor, selectionMessage = 0, "Maintiens le clic droit"
 local visibleColor, hiddenColor = Color3.fromRGB(65,235,120), Color3.fromRGB(255,65,80)
 local function releaseVisuals(r)
  if r.highlight then r.highlight:Destroy(); r.highlight=nil end
- if r.info then r.info:Destroy(); r.info=nil; r.text=nil end
+ if r.info then r.info:Destroy(); r.info=nil; r.text=nil; r.healthBar=nil; r.healthFill=nil; r.healthValue=nil end
  if r.skeleton then r.skeleton:Destroy(); r.skeleton=nil; r.bones=nil end
  r.rig=nil
 end
@@ -230,9 +319,17 @@ local function allocateVisuals(r)
  if r.highlight then return end
  r.highlight=make("Highlight",gui,{Adornee=r.model,Enabled=false,FillTransparency=1,
   OutlineTransparency=0,DepthMode=Enum.HighlightDepthMode.AlwaysOnTop})
- r.info=make("BillboardGui",gui,{Size=UDim2.fromOffset(230,78),StudsOffsetWorldSpace=Vector3.new(0,3,0),AlwaysOnTop=true,Enabled=false})
- r.text=label(r.info,"",UDim2.new(),UDim2.fromScale(1,1))
+ r.info=make("BillboardGui",gui,{Size=UDim2.fromOffset(230,86),StudsOffsetWorldSpace=Vector3.new(0,3,0),AlwaysOnTop=true,Enabled=false})
+ r.text=label(r.info,"",UDim2.new(),UDim2.new(1,0,1,-18))
  r.text.TextXAlignment=Enum.TextXAlignment.Center; r.text.TextStrokeTransparency=.25
+ r.healthBar=make("Frame",r.info,{Name="HealthBar",AnchorPoint=Vector2.new(.5,1),Position=UDim2.new(.5,0,1,-2),Size=UDim2.fromOffset(140,12),BackgroundColor3=Color3.fromRGB(20,22,25),BorderSizePixel=0,ClipsDescendants=true})
+ make("UICorner",r.healthBar,{CornerRadius=UDim.new(0,4)})
+ make("UIStroke",r.healthBar,{Color=Color3.fromRGB(8,9,12),Thickness=1})
+ r.healthFill=make("Frame",r.healthBar,{Size=UDim2.fromScale(1,1),BackgroundColor3=Color3.fromRGB(65,235,120),BorderSizePixel=0})
+ make("UICorner",r.healthFill,{CornerRadius=UDim.new(0,4)})
+ r.healthValue=label(r.healthBar,"",UDim2.new(),UDim2.fromScale(1,1))
+ r.healthValue.TextXAlignment=Enum.TextXAlignment.Center; r.healthValue.TextSize=10
+ r.healthValue.Font=Enum.Font.GothamBold; r.healthValue.TextStrokeTransparency=.35; r.healthValue.ZIndex=2
 end
 local r15Bones={
  {"Head","UpperTorso"},{"UpperTorso","LowerTorso"},
@@ -374,13 +471,22 @@ local function scan(camera)
   r.highlight.OutlineColor=color
   r.info.Adornee=r.head or r.displayPart
   r.info.Enabled=config.Names or config.Health or config.Distance
+  r.healthBar.Visible=config.Health
+  if config.Health then
+   local maximum=math.max(0,r.humanoid.MaxHealth)
+   local health=math.clamp(r.humanoid.Health,0,maximum)
+   local ratio=maximum>0 and health/maximum or 0
+   r.healthFill.Size=UDim2.fromScale(ratio,1)
+   r.healthFill.BackgroundColor3=Color3.fromHSV(ratio/3,0.85,0.95)
+   local value=string.format("%.0f / %.0f",health,maximum)
+   if r.healthValue.Text~=value then r.healthValue.Text=value end
+  end
   if r.info.Enabled then
    local lines={}
    if config.Names then
     if not r.bot and r.owner then table.insert(lines,"[JOUEUR] "..r.owner.DisplayName) end
     table.insert(lines,r.inSight and "VISIBLE" or "CACHE")
    end
-   if config.Health then table.insert(lines,string.format("Vie : %.0f / %.0f",r.humanoid.Health,r.humanoid.MaxHealth)) end
    if config.Distance then table.insert(lines,string.format("%.0f studs",r.distance)) end
    local value=table.concat(lines,"\n")
    if r.text.Text~=value then r.text.Text=value end
@@ -435,7 +541,7 @@ connect(workspace:GetPropertyChangedSignal("CurrentCamera"),releaseCamera)
 local function acquire(camera)
  -- Le rayon sert a choisir une cible, pas a changer de personnage pendant le suivi.
  if config.Sticky and valid(locked) then
-  if not config.WallCheck or clearTo(camera,locked.model,locked.aimPart.Position) then
+  if config.ThroughWalls or clearTo(camera,locked.model,locked.aimPart.Position) then
    blockedSince=nil; aimBlocked=false; return
   end
   -- Un obstacle tres bref ne provoque pas un saut vers une autre tete.
@@ -458,7 +564,7 @@ local function acquire(camera)
   end
  end
  for _,r in shortlist do
-  if not config.WallCheck or clearTo(camera,r.model,r.aimPart.Position) then locked=r; break end
+  if config.ThroughWalls or clearTo(camera,r.model,r.aimPart.Position) then locked=r; break end
  end
  selectionMessage=#shortlist==0 and "Aucune cible dans le rayon / verifie Cibles" or "Cible bloquee par un obstacle"
 end
@@ -472,7 +578,7 @@ connect(RunService.Heartbeat,function(dt)
  if not camera then return end
  scan(camera)
  local viewport=camera.ViewportSize
- local wantedScale=math.max(.1,math.min(1,(viewport.X-36)/500,(viewport.Y-82)/470))
+ local wantedScale=math.max(.1,math.min(1,(viewport.X-36)/760,(viewport.Y-82)/520))
  if scale.Scale~=wantedScale then scale.Scale=wantedScale end
  circle.Size=UDim2.fromOffset(config.Fov*2,config.Fov*2)
  circle.Position=UDim2.fromOffset(viewport.X/2,viewport.Y/2)
