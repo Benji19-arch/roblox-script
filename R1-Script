@@ -372,7 +372,12 @@ local function rememberModel(obj)
 end
 local function seedTPS()
  if playerScripts then enqueue(playerScripts:FindFirstChild("TPS_Client"),true,true) end
- enqueue(ReplicatedStorage:FindFirstChild("TPS"),true,true)
+ local tps=ReplicatedStorage:FindFirstChild("TPS")
+ if tps then
+  enqueue(tps:FindFirstChild("Config"),true,true)
+  enqueue(tps:FindFirstChild("Shared"),true,true)
+  enqueue(tps,true,true)
+ end
 end
 local function addParameter(obj,key,value,kind)
  if #report.parameters>=MAX_PARAMETERS then report.stats.parametersLimited=true; return end
@@ -501,6 +506,30 @@ local function projectileSample(track,now)
  track.lastAt=now; track.lastPosition=position
  return #track.entry.samples<12
 end
+local function measurementOrigin(camera)
+ local character=player.Character
+ local held=character and character:FindFirstChild("TPS_HeldWeapon")
+ if held then
+  local handle=held:FindFirstChild("Handle")
+  local muzzle=handle and handle:FindFirstChild("Muzzle")
+  if muzzle and muzzle:IsDescendantOf(character) and muzzle:IsDescendantOf(workspace) then
+   if muzzle:IsA("Attachment") then return muzzle.WorldPosition,"held_weapon_muzzle" end
+   if muzzle:IsA("BasePart") then return muzzle.Position,"held_weapon_muzzle" end
+  end
+ end
+ for _,ref in muzzleRefs do
+  if ref:IsDescendantOf(workspace) then
+   local ancestor=ref
+   local stowed=false
+   while ancestor and ancestor~=character and ancestor~=workspace do
+    if ancestor.Name=="TPS_BackWeapons" then stowed=true; break end
+    ancestor=ancestor.Parent
+   end
+   if not stowed then return ref:IsA("Attachment") and ref.WorldPosition or ref.Position,"muzzle_candidate" end
+  end
+ end
+ return camera.CFrame.Position,"camera_fallback"
+end
 local function observeProjectile(obj)
  if stopped or #report.projectileCandidates>=8 or not obj:IsA("BasePart") or seenProjectiles[obj] then return end
  if not obj:IsDescendantOf(workspace) then return end
@@ -516,10 +545,7 @@ local function observeProjectile(obj)
   ancestor=ancestor.Parent
  end
  if not named then return end
- local origin=camera.CFrame.Position
- for _,ref in muzzleRefs do
-  if ref:IsDescendantOf(workspace) then origin=ref:IsA("Attachment") and ref.WorldPosition or ref.Position; break end
- end
+ local origin,originSource=measurementOrigin(camera)
  local distance=(obj.Position-origin).Magnitude
  if distance>80 then return end
  local now=os.clock()
@@ -527,7 +553,7 @@ local function observeProjectile(obj)
  local duringInput=Input:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) or (age and age<.6)
  if not duringInput then return end
  local entry={path=pathOf(obj),class=obj.ClassName,anchored=obj.Anchored,size=vector(obj.Size),
-  distanceFromObservedOrigin=number(distance),activationAge=age and number(age) or nil,
+  distanceFromObservedOrigin=number(distance),originSource=originSource,activationAge=age and number(age) or nil,
   ownership="unconfirmed",samples={}}
  seenProjectiles[obj]=true
  table.insert(report.projectileCandidates,entry)
@@ -562,7 +588,7 @@ local function finish(reason)
  report.durationSeconds=number(os.clock()-started); report.stopReason=reason
  captureMuzzles()
  report.stats.sourceAttempts=sourceAttempts; report.stats.sourceBytes=sourceBytes
- report.stats.sourceReadable=sourceReadable==true
+ report.stats.sourceReadable=sourceBytes>0
  report.stats.sourceAccess=sourceAttempts==0 and "not_attempted" or (sourceReadable==true and (sourceBytes>0 and "readable" or "empty_or_unavailable") or "protected_or_unavailable")
  report.stats.pendingNodes=math.max(0,report.stats.queued-report.stats.visited)
  local json=Http:JSONEncode(report)
@@ -629,6 +655,118 @@ connect(RunService.Heartbeat,function(dt)
 end)
 return {cancel=cancel,finish=finish}
 end
+-- Lecture volontaire du seul module Config ; son initialisation peut s'executer.
+local function startTPSConfigReport(onComplete)
+ local Http=game:GetService("HttpService")
+ local started=os.clock()
+ local done=false
+ local worker,timer=nil,nil
+ local seenTables={}
+ local stats={nodes=0,tables=0,stringBytes=0,functionsSkipped=0,nodeLimit=false,depthLimit=false,tableLimit=false,stringLimit=false}
+ local report={format="R1-TPS-CONFIG-1",placeId=game.PlaceId,modulePath="ReplicatedStorage/TPS/Config",loaded=false,stats=stats,
+  notes={"Lecture declenchee par le bouton Lire Config TPS.","require peut executer l'initialisation du module dans cet environnement.","Les valeurs retournees sont exportees ; leur code source n'est pas extrait.","Les fonctions retournees ne sont pas appelees et les tables du module ne sont pas modifiees.","Aucun Shared ni autre module n'est explicitement charge par ce lecteur ; Config peut avoir ses propres dependances.","Aucun tir ni appel de remote n'est explicitement declenche par ce lecteur.","L'export est limite a 512 valeurs, 128 cles par table et 6 niveaux."}}
+ local function clip(value,limit)
+  local kind=typeof(value)
+  local raw=kind=="string" and value or ((kind=="number" or kind=="boolean") and tostring(value) or ("<"..kind..">"))
+  local text=raw:gsub("[%z\1-\8\11\12\14-\31]","?")
+  if not utf8.len(text) then text=text:gsub("[^%g%s]","?") end
+  local cut=math.min(#text,limit)
+  while cut>0 do
+   local byte=string.byte(text,cut+1)
+   if not byte or byte<128 or byte>191 then break end
+   cut-=1
+  end
+  return string.sub(text,1,cut)
+ end
+ local function numeric(value)
+  return (value~=value or value==math.huge or value==-math.huge) and tostring(value) or value
+ end
+ local function rank(key)
+  if typeof(key)~="string" then return 0 end
+  local name=string.lower(key)
+  for _,word in {"weapon","gun","bullet","projectile","ballistic","speed","velocity","gravity","range","damage","spread","recoil","penetration"} do
+   if string.find(name,word,1,true) then return 1 end
+  end
+  return 0
+ end
+ local function packConfigValue(value,depth)
+  if stats.nodes>=512 then stats.nodeLimit=true; return {kind="node_limit"} end
+  stats.nodes+=1
+  local kind=typeof(value)
+  if kind=="table" then
+   if seenTables[value] then return {kind="reference",id=seenTables[value]} end
+   if depth>=6 then stats.depthLimit=true; return {kind="depth_limit"} end
+   stats.tables+=1; seenTables[value]=stats.tables
+   local result={kind="table",id=stats.tables,entries={}}
+   local fields={}
+   local examined=0
+   -- next lit les champs bruts et ne fait pas appel a un iterateur du module.
+   for key,item in next,value do
+    examined+=1
+    if examined>128 then stats.tableLimit=true; result.truncated=true; break end
+    local keyKind=typeof(key)
+    if keyKind=="string" or keyKind=="number" then table.insert(fields,{key=key,value=item,rank=rank(key)}) end
+   end
+   table.sort(fields,function(a,b) return a.rank>b.rank end)
+   for _,field in fields do
+    if stats.nodes>=512 then stats.nodeLimit=true; result.truncated=true; break end
+    table.insert(result.entries,{key=typeof(field.key)=="string" and clip(field.key,80) or numeric(field.key),keyType=typeof(field.key),value=packConfigValue(field.value,depth+1)})
+   end
+   return result
+  elseif kind=="string" then
+   local allowed=math.max(0,math.min(256,32000-stats.stringBytes))
+   local text=clip(value,allowed); stats.stringBytes+=#text
+   if #text<#value then stats.stringLimit=true end
+   return {kind=kind,value=text,truncated=#text<#value}
+  elseif kind=="number" then return {kind=kind,value=numeric(value)}
+  elseif kind=="boolean" then return {kind=kind,value=value}
+  elseif kind=="Vector3" then return {kind=kind,value={numeric(value.X),numeric(value.Y),numeric(value.Z)}}
+  elseif kind=="CFrame" then
+   local values={value:GetComponents()}; for i,n in values do values[i]=numeric(n) end
+   return {kind=kind,value=values}
+  elseif kind=="EnumItem" then return {kind=kind,value=clip(tostring(value),120)}
+  elseif kind=="function" then stats.functionsSkipped+=1 end
+  return {kind=kind}
+ end
+ local function stopTasks()
+  if worker then pcall(task.cancel,worker); worker=nil end
+  if timer then pcall(task.cancel,timer); timer=nil end
+ end
+ local function cancel()
+  if done then return end
+  done=true; stopTasks(); table.clear(seenTables)
+ end
+ local function finish(reason)
+  if done then return end
+  done=true; stopTasks()
+  report.stopReason=reason; report.durationSeconds=math.round((os.clock()-started)*1000)/1000
+  local ok,json=pcall(function() return Http:JSONEncode(report) end)
+  if not ok then json=Http:JSONEncode({format=report.format,error=clip(json,200),stopReason="serialization_error"}); reason="serialization_error" end
+  if #json>120000 then
+   json=Http:JSONEncode({format=report.format,modulePath=report.modulePath,error="report_size_limit",stats=stats,stopReason="report_size_limit"}); reason="report_size_limit"
+  end
+  table.clear(seenTables)
+  print("R1_TPS_CONFIG_BEGIN")
+  for i=1,#json,3000 do print(string.sub(json,i,i+2999)) end
+  print("R1_TPS_CONFIG_END")
+  onComplete(json,reason)
+ end
+ timer=task.delay(5,function() timer=nil; report.error="module_timeout"; finish("module_timeout") end)
+ worker=task.defer(function()
+  local folder=game:GetService("ReplicatedStorage"):FindFirstChild("TPS")
+  local module=folder and folder:FindFirstChild("Config")
+  if not module or not module:IsA("ModuleScript") then worker=nil; report.error="module_not_found"; finish("module_not_found"); return end
+  local ok,value=pcall(require,module)
+  if done then return end
+  if not ok then worker=nil; report.error=clip(value,200); finish("module_require_error"); return end
+  report.loaded=true; report.resultType=typeof(value)
+  local exported,data=pcall(packConfigValue,value,0)
+  worker=nil
+  if not exported then report.error=clip(data,200); finish("export_error"); return end
+  report.data=data; finish("completed")
+ end)
+ return {cancel=cancel,finish=finish}
+end
 local weaponReportRun=nil
 local weaponReportGeneration=0
 do
@@ -639,9 +777,13 @@ do
  round(collect)
  local choose=make("TextButton",page,{Name="SelectWeaponReport",Position=UDim2.new(1,-214,0,12),Size=UDim2.fromOffset(202,34),Text="Selectionner le rapport",BackgroundColor3=bg,TextColor3=accent,TextSize=12,Font=Enum.Font.GothamBold,BorderSizePixel=0,Visible=false})
  round(choose)
- local reportStatus=label(page,"Equipe ton arme, puis clique Lancer. Le menu se replie pendant 12 secondes et revient ici avec le rapport.",UDim2.fromOffset(12,56),UDim2.new(1,-24,0,50))
+ local readConfig=make("TextButton",page,{Name="ReadTPSConfig",Position=UDim2.fromOffset(12,56),Size=UDim2.fromOffset(212,32),Text="Lire Config TPS",BackgroundColor3=bg,TextColor3=accent,TextSize=12,Font=Enum.Font.GothamBold,BorderSizePixel=0})
+ round(readConfig)
+ local configNotice=label(page,"Charge Config et peut lancer son initialisation.",UDim2.fromOffset(236,56),UDim2.new(1,-248,0,34))
+ configNotice.TextSize=11; configNotice.TextColor3=muted; configNotice.TextWrapped=true
+ local reportStatus=label(page,"Pour les parametres de l arme, clique Lire Config TPS. Pour observer les tirs, lance la collecte de 12 secondes.",UDim2.fromOffset(12,100),UDim2.new(1,-24,0,42))
  reportStatus.TextSize=12; reportStatus.TextWrapped=true; reportStatus.TextYAlignment=Enum.TextYAlignment.Top
- local scroll=make("ScrollingFrame",page,{Name="WeaponReportScroll",Position=UDim2.fromOffset(12,112),Size=UDim2.new(1,-24,1,-124),BackgroundColor3=bg,BorderSizePixel=0,ScrollBarThickness=4,ScrollBarImageColor3=accent,CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,Visible=false})
+ local scroll=make("ScrollingFrame",page,{Name="WeaponReportScroll",Position=UDim2.fromOffset(12,150),Size=UDim2.new(1,-24,1,-162),BackgroundColor3=bg,BorderSizePixel=0,ScrollBarThickness=4,ScrollBarImageColor3=accent,CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,Visible=false})
  round(scroll)
  local reportBox=make("TextBox",scroll,{Name="WeaponReportText",Position=UDim2.fromOffset(8,8),Size=UDim2.new(1,-20,0,0),AutomaticSize=Enum.AutomaticSize.Y,BackgroundTransparency=1,MultiLine=true,ClearTextOnFocus=false,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Font=Enum.Font.Code,TextSize=12,TextColor3=white,Text=""})
  connect(choose.Activated,function()
@@ -649,6 +791,25 @@ do
   reportBox.Text=lastWeaponReport
   reportBox:CaptureFocus(); reportBox.CursorPosition=#reportBox.Text+1; reportBox.SelectionStart=1
   reportStatus.Text="Rapport selectionne : Ctrl+C pour copier, puis colle-le dans le chat."
+ end)
+ local function completeReport(generation,json,reason)
+   if stopped or generation~=weaponReportGeneration then return end
+   weaponReportRun=nil; lastWeaponReport=json
+   reportBox.Text=json; scroll.Visible=true; scroll.CanvasPosition=Vector2.zero
+   collect.Text="Relancer la collecte (12 s)"; readConfig.Text="Lire Config TPS"; choose.Visible=true
+   local summary=reason=="completed" and "Rapport pret." or (reason=="manual" and "Rapport partiel : mesure arretee." or "Rapport avec erreur.")
+   reportStatus.Text=summary.." Clique Selectionner, puis Ctrl+C et colle-le dans le chat."
+   menu.Text="R1 / MENU"; panel.Visible=true; selectTab("Rapport")
+ end
+ connect(readConfig.Activated,function()
+  if weaponReportRun then reportStatus.Text="Une operation est en cours. Termine-la avant de lire Config."; return end
+  weaponReportGeneration+=1
+  local generation=weaponReportGeneration
+  reportBox:ReleaseFocus(); choose.Visible=false; scroll.Visible=false
+  reportStatus.Text="Lecture du module Config TPS en cours..."
+  readConfig.Text="Lecture en cours..."; collect.Text="Arreter la lecture"
+  menu.Text="CONFIG / lecture"
+  weaponReportRun=startTPSConfigReport(function(json,reason) completeReport(generation,json,reason) end)
  end)
  connect(collect.Activated,function()
   if weaponReportRun then weaponReportRun.finish("manual"); return end
@@ -663,13 +824,7 @@ do
    reportStatus.Text=string.format("Encore %.0f s | %d scripts, %d parametres, %d projectiles candidats",remaining,scripts,parameters,projectiles)
    menu.Text=string.format("RAPPORT / %.0f s",remaining)
   end,function(json,reason)
-   if stopped or generation~=weaponReportGeneration then return end
-   weaponReportRun=nil; lastWeaponReport=json
-   reportBox.Text=json; scroll.Visible=true; scroll.CanvasPosition=Vector2.zero
-   collect.Text="Relancer la collecte (12 s)"; choose.Visible=true
-   local summary=reason=="completed" and "Rapport pret." or (reason=="manual" and "Rapport partiel : mesure arretee." or "Rapport avec erreur.")
-   reportStatus.Text=summary.." Clique Selectionner, puis Ctrl+C et colle-le dans le chat. Les sources protegees restent inaccessibles."
-   menu.Text="R1 / MENU"; panel.Visible=true; selectTab("Rapport")
+   completeReport(generation,json,reason)
   end)
  end)
  local shortcut=make("TextButton",columns.Reglages.left,{Size=UDim2.new(1,0,0,38),Text="Ouvrir le rapport de l arme",BackgroundColor3=rowColor,TextColor3=accent,TextSize=11,Font=Enum.Font.GothamBold,BorderSizePixel=0})
