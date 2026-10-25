@@ -7,8 +7,19 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Input = game:GetService("UserInputService")
 local player = Players.LocalPlayer
+local GuiService=game:GetService("GuiService")
+local relativeInput,virtualInput=nil,nil
+local inputLookupOK,inputLookup=pcall(function() return mousemoverel end)
+if inputLookupOK and typeof(inputLookup)=="function" then relativeInput=inputLookup end
+do
+ local ok,value=pcall(function() return Input:CreateVirtualInput() end)
+ if ok and value then virtualInput=value; relativeInput=nil end
+end
+local gameInputAvailable=relativeInput~=nil or virtualInput~=nil
+local gameInputError=nil
+local nativeArmed=false
 local defaults = {
- Aim=true, Bots=true, TargetPlayers=true, TeamCheck=true, ThroughWalls=true,
+ Aim=true, Driver="Jeu", GameSpeed=3, Bots=true, TargetPlayers=true, TeamCheck=true, ThroughWalls=true,
  Sticky=true, ESP=true, Outline=true, Skeleton=true, Names=true, Health=true, HealthNumbers=true, HealthThickness=3, Distance=true,
  Circle=true, Fov=160, Smooth=12, Range=1000, Part="Head",
  Activation="Maintenir", Tracking="Direct", CenterCharacter=true, RotateCharacter=true, AimDistance=8, MaxESP=16, SkeletonFPS=20,
@@ -122,10 +133,11 @@ local function refreshAll() for _,refresh in refreshers do refresh() end end
 local function changed(key,value)
  if config[key]==value then return end
  config[key]=value
- if key=="Aim" or key=="Bots" or key=="TargetPlayers" or key=="TeamCheck" or key=="Part" or key=="Range" then locked=nil end
+ if key=="Driver" then gameInputError=nil; nativeArmed=false end
+ if key=="Aim" or key=="Driver" or key=="Bots" or key=="TargetPlayers" or key=="TeamCheck" or key=="Part" or key=="Range" then locked=nil end
  refreshAll()
 end
-local displayValues={Head="Tete",HumanoidRootPart="Torse",Maintenir="Clic droit maintenu",Permanent="Toujours active",Direct="Direct",Fluide="Fluide"}
+local displayValues={Jeu="Jeu / entrees souris",Camera="Camera / classique",Head="Tete",HumanoidRootPart="Torse",Maintenir="Clic droit maintenu",Permanent="Toujours active",Direct="Direct",Fluide="Fluide"}
 local function setting(page,key,title,values,suffix,side)
  local numeric=values and typeof(values[1])=="number"
  local parent=side and columns[page][side] or (values and columns[page].right or columns[page].left)
@@ -184,14 +196,16 @@ for _,option in {{"ESP","Activer l'ESP"},{"Outline","Contour de silhouette"},{"S
 setting("Affichage","Range","Distance maximale",{150,300,600,1000,3000}," studs")
 setting("Affichage","HealthThickness","Epaisseur barre de vie",{3,5,8,12}," px")
 setting("Affichage","HealthNumbers","Points de vie restants",nil,nil,"right")
+setting("Visee","Driver","Commande de visee",{"Jeu","Camera"},nil,"left")
 setting("Visee","Aim","Activer la visee")
 setting("Visee","Sticky","Conserver la cible")
-setting("Visee","CenterCharacter","Camera centree sur le personnage")
-setting("Visee","RotateCharacter","Tourner vers la cible")
+setting("Visee","CenterCharacter","Centrage (mode Camera)")
+setting("Visee","RotateCharacter","Rotation du corps (mode Camera)")
 setting("Visee","ThroughWalls","Viser a travers les murs")
 setting("Visee","Activation","Activation",{"Maintenir","Permanent"})
 setting("Visee","Part","Point de visee",{"Head","HumanoidRootPart"})
 setting("Visee","Tracking","Suivi de la cible",{"Direct","Fluide"})
+setting("Visee","GameSpeed","Reactivite du mode Jeu",{1,2,3,4})
 setting("Visee","Fov","Rayon de selection",{60,100,160,240,320}," px")
 setting("Visee","Smooth","Reactivite du suivi fluide",{4,8,12,20,32})
 setting("Visee","AimDistance","Recul de camera",{4,6,8,12,16}," studs")
@@ -207,7 +221,8 @@ local function note(parent,message,height)
  return item
 end
 note(columns.Affichage.right,"VERT : personnage visible\nROUGE : personnage cache\n\nLa barre de vie passe du rouge au vert selon les points de vie. Les noms des bots sont masques.",116)
-note(columns.Visee.left,"Le mode Direct suit la position actuelle de la tete. Desactive la camera centree pour garder le zoom et le placement de la camera du jeu. Les deplacements restent geres par le jeu.",110)
+note(columns.Visee.left,gameInputAvailable and "MODE JEU : ferme le menu avec Inser, puis maintiens le clic droit. La visee passe par les commandes du jeu. Centrage et rotation manuelle concernent le mode Camera." or "MODE JEU INDISPONIBLE : aucune entree souris compatible trouvee. Le mode Camera reste accessible. Aucun verrouillage ne garantit un impact.",124)
+note(columns.Visee.left,"Le jeu conserve la dispersion, la portee et les collisions des armes. Une cible suivie derriere un mur peut rester impossible a toucher.",80)
 note(columns.Cibles.right,"Les PNJ sont les modeles avec un Humanoid.\n\nPour un PNJ allie : Friendly = true ou TeamName = nom de ton equipe.",110)
 note(columns.Reglages.left,"RACCOURCIS\n\nClic droit maintenu : viser\nInser : ouvrir / fermer\nEn-tete : deplacer le menu\n\nPour alleger l'affichage : 8 personnages et squelette a 10 Hz.",160)
 local reset=make("TextButton",columns.Reglages.left,{Size=UDim2.new(1,0,0,38),Text="Retablir les reglages",BackgroundColor3=rowColor,TextColor3=accent,TextSize=11,Font=Enum.Font.GothamBold,BorderSizePixel=0}); round(reset)
@@ -830,14 +845,14 @@ do
  local shortcut=make("TextButton",columns.Reglages.left,{Size=UDim2.new(1,0,0,38),Text="Ouvrir le rapport de l arme",BackgroundColor3=rowColor,TextColor3=accent,TextSize=11,Font=Enum.Font.GothamBold,BorderSizePixel=0})
  round(shortcut); connect(shortcut.Activated,function() panel.Visible=true; selectTab("Rapport") end)
 end
-selectTab("Rapport")
+selectTab("Visee")
 -- Registre 10 Hz, recherche de cible 12,5 Hz, squelette 20 Hz.
 -- La cible verrouillee et la camera sont suivies a chaque image.
 local SCAN_INTERVAL, AIM_INTERVAL = 0.1, 0.08
 local VISIBILITY_BUDGET = 4
 local registryList, aimCandidates, displayList, activeRecords = {}, {}, {}, {}
 local localCharacter, localRoot, localHumanoid
-local focused, scanClock, aimClock, boneClock = true, 0, 0, 0
+local focused, scanClock, aimClock, boneClock = false, 0, 0, 0
 local visibilityCursor, selectionMessage = 0, "Maintiens le clic droit"
 local visibleColor, hiddenColor = Color3.fromRGB(65,235,120), Color3.fromRGB(255,65,80)
 local function releaseVisuals(r)
@@ -897,11 +912,15 @@ task.defer(function()
  end
 end)
 connect(Input.InputBegan,function(input,processed)
+ focused=true
+ if input.UserInputType==Enum.UserInputType.MouseButton2 and not panel.Visible and not GuiService.MenuIsOpen and not Input:GetFocusedTextBox() then
+  nativeArmed=true; gameInputError=nil
+ end
  if not processed and not Input:GetFocusedTextBox() and input.KeyCode==Enum.KeyCode.Insert then
   panel.Visible=not panel.Visible
  end
 end)
-connect(Input.WindowFocusReleased,function() focused=false; locked=nil end)
+connect(Input.WindowFocusReleased,function() focused=false; nativeArmed=false; locked=nil end)
 connect(Input.WindowFocused,function() focused=true end)
 local rayParams=RaycastParams.new()
 rayParams.FilterType=Enum.RaycastFilterType.Exclude
@@ -1215,7 +1234,7 @@ local function aimRotation(origin,target,previous)
  return CFrame.fromMatrix(Vector3.zero,right,right:Cross(forward).Unit,-forward)
 end
 local function aimRequested()
- return focused and config.Aim and not Input:GetFocusedTextBox()
+ return focused and config.Aim and not GuiService.MenuIsOpen and not Input:GetFocusedTextBox()
   and (config.Activation=="Permanent" or Input:IsMouseButtonPressed(Enum.UserInputType.MouseButton2))
 end
 local function acquire(camera)
@@ -1253,6 +1272,156 @@ local function acquire(camera)
  locked=candidate
  selectionMessage=#shortlist==0 and "Aucune cible dans le rayon / verifie Cibles" or "Cible bloquee par un obstacle"
 end
+-- Le mode Jeu pilote le controleur existant ; il ne reecrit pas la camera ou le corps.
+local gameAimMessage=""
+local gameRates={12,24,48,72}
+local gameAim={clock=0,carryX=0,carryY=0,advanceX=0,advanceY=0,stability=1,watchClock=0}
+local function resetGameAim()
+ gameAim.record=nil; gameAim.part=nil; gameAim.camera=nil; gameAim.rotation=nil; gameAim.relative=nil
+ gameAim.responseX=nil; gameAim.responseY=nil; gameAim.candidateX=nil; gameAim.candidateY=nil
+ gameAim.clock=0; gameAim.carryX=0; gameAim.carryY=0; gameAim.advanceX=0; gameAim.advanceY=0
+ gameAim.previousError=nil; gameAim.stability=1; gameAim.watch=nil; gameAim.watchClock=0
+ gameAim.insideX=false; gameAim.insideY=false
+end
+local function gameAimReady()
+ if not gameInputAvailable then return false,"Mode Jeu indisponible : choisis Camera dans Visee" end
+ if gameInputError then return false,gameInputError end
+ if panel.Visible then return false,"Ferme le menu avec Inser pour viser" end
+ if not nativeArmed then return false,"Appuie sur le clic droit dans le jeu pour activer la visee" end
+ if GuiService.MenuIsOpen or Input:GetFocusedTextBox() or not focused then return false,"Visee en pause" end
+ if Input.MouseBehavior==Enum.MouseBehavior.Default then return false,"Maintiens la visee du jeu : souris non verrouillee" end
+ return true
+end
+local function viewAngles(direction)
+ return math.atan2(direction.X,-direction.Z),math.atan2(-direction.Y,math.sqrt(direction.X*direction.X+direction.Z*direction.Z))
+end
+local function angleDifference(a,b)
+ return (a-b+math.pi)%(2*math.pi)-math.pi
+end
+local function learnResponse(current,candidate,sample)
+ local magnitude=math.abs(sample)
+ if magnitude<.00001 or magnitude>.05 then return current,candidate end
+ if current then
+  local ratio=sample/current
+  if ratio>.5 and ratio<2 then return current*.85+sample*.15,nil end
+  return current,candidate
+ end
+ if candidate and sample/candidate>.5 and sample/candidate<2 then return (candidate+sample)/2,nil end
+ return nil,sample
+end
+local function stepGameAim(dt)
+ if stopped then return end
+ if config.Driver~="Jeu" then resetGameAim(); gameAimMessage=""; return end
+ local ready,message=gameAimReady()
+ if not ready then resetGameAim(); gameAimMessage=message; return end
+ local camera=workspace.CurrentCamera
+ if not aimRequested() or not camera or not localHumanoid or localHumanoid.Health<=0 or localCharacter~=player.Character or localHumanoid.Parent~=localCharacter then
+  resetGameAim(); gameAimMessage="Maintiens le clic droit pour viser"; return
+ end
+ if not valid(locked) then resetGameAim(); gameAimMessage=selectionMessage; return end
+ if aimBlocked then resetGameAim(); gameAimMessage="Visee en pause : obstacle"; return end
+ local part=locked.aimPart
+ if gameAim.record~=locked or gameAim.camera~=camera or gameAim.part~=part then
+  resetGameAim(); gameAim.record=locked; gameAim.camera=camera; gameAim.part=part
+ end
+ local rotation=camera.CFrame.Rotation
+ local position=part.Position
+ local point=camera:WorldToViewportPoint(position)
+ if point.Z<=0 then
+  locked=nil; aimClock=AIM_INTERVAL; resetGameAim(); gameAimMessage="Cible sortie du champ : nouvelle recherche"; return
+ end
+ local relative=position-camera.CFrame.Position
+ local localDirection=rotation:VectorToObjectSpace(relative)
+ local yaw,pitch=viewAngles(localDirection)
+ if gameAim.relative then
+  local previousYaw,previousPitch=viewAngles(rotation:VectorToObjectSpace(gameAim.relative))
+  gameAim.advanceX+=angleDifference(yaw,previousYaw)
+  gameAim.advanceY+=angleDifference(pitch,previousPitch)
+ end
+ gameAim.relative=relative
+ if gameAim.rotation and not Input:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
+  local delta=Input:GetMouseDelta()
+  local sensitivity=Input.MouseDeltaSensitivity
+  if sensitivity>0 then
+   delta=delta/sensitivity
+   local observed=gameAim.rotation:ToObjectSpace(rotation).LookVector
+   local changeX,changeY=viewAngles(observed)
+   if math.abs(delta.X)>=1 and math.abs(changeX)<.35 then
+    gameAim.responseX,gameAim.candidateX=learnResponse(gameAim.responseX,gameAim.candidateX,changeX/delta.X)
+   end
+   if math.abs(delta.Y)>=1 and math.abs(changeY)<.35 and math.abs(rotation.LookVector.Y)<.95 then
+    gameAim.responseY,gameAim.candidateY=learnResponse(gameAim.responseY,gameAim.candidateY,changeY/delta.Y)
+   end
+  end
+ end
+ gameAim.rotation=rotation
+ if gameAim.watch then
+  local movement=(gameAim.watch:ToObjectSpace(rotation).LookVector-Vector3.new(0,0,-1)).Magnitude
+  if movement>.00001 then gameAim.watch=nil; gameAim.watchClock=0
+  else
+   gameAim.watchClock+=dt
+   if gameAim.watchClock>.75 then
+    gameInputError="Le jeu ne reagit pas aux entrees : relache puis reprends le clic droit"
+    resetGameAim(); gameAimMessage=gameInputError; return
+   end
+  end
+ end
+ local error=Vector2.new(point.X,point.Y)-camera.ViewportSize/2
+ local focal=camera.ViewportSize.Y/(2*math.tan(math.rad(camera.FieldOfView)/2))
+ local deadX=relativeInput and math.max(.35,math.abs(gameAim.responseX or 0)*focal*.5) or .35
+ local deadY=relativeInput and math.max(.35,math.abs(gameAim.responseY or 0)*focal*.5) or .35
+ gameAimMessage=string.format("Mode Jeu / ecart ecran : %.1f px",error.Magnitude)
+ local insideX,insideY=math.abs(error.X)<=deadX,math.abs(error.Y)<=deadY
+ if insideX and not gameAim.insideX then gameAim.carryX=0 end
+ if insideY and not gameAim.insideY then gameAim.carryY=0 end
+ gameAim.insideX=insideX; gameAim.insideY=insideY
+ local moving=(math.abs(gameAim.advanceX)+math.abs(gameAim.advanceY))*focal>.01
+ if insideX and insideY and not moving then
+  gameAim.clock=0; gameAim.carryX=0; gameAim.carryY=0; gameAim.advanceX=0; gameAim.advanceY=0
+  gameAim.watch=nil; gameAim.watchClock=0; gameAim.previousError=nil; return
+ end
+ gameAim.clock+=dt
+ if gameAim.clock<1/120 then return end
+ local elapsed=math.min(gameAim.clock,.05); gameAim.clock=0
+ if gameAim.previousError then
+  local previous=gameAim.previousError
+  local flipX=error.X*previous.X<0 and math.abs(error.X)>deadX+1 and math.abs(error.X)>math.abs(previous.X)*.7
+  local flipY=error.Y*previous.Y<0 and math.abs(error.Y)>deadY+1 and math.abs(error.Y)>math.abs(previous.Y)*.7
+  if flipX or flipY then gameAim.stability=math.max(.25,gameAim.stability*.7)
+  else gameAim.stability=math.min(1,gameAim.stability+.005) end
+ end
+ gameAim.previousError=error
+ local rate=config.Tracking=="Direct" and gameRates[config.GameSpeed] or config.Smooth
+ local alpha=(1-math.exp(-rate*elapsed))*gameAim.stability
+ local advanceLimit=math.pi*elapsed
+ local advanceX=math.clamp(gameAim.advanceX,-advanceLimit,advanceLimit)
+ local advanceY=math.clamp(gameAim.advanceY,-advanceLimit,advanceLimit)
+ gameAim.advanceX=0; gameAim.advanceY=0
+ local x=gameAim.responseX and (yaw*alpha/1.25+advanceX)/gameAim.responseX or error.X*.08*elapsed*60
+ local y=gameAim.responseY and (pitch*alpha/1.25+advanceY)/gameAim.responseY or error.Y*.08*elapsed*60
+ if insideX then x=gameAim.responseX and advanceX/gameAim.responseX or 0 end
+ if insideY then y=gameAim.responseY and advanceY/gameAim.responseY or 0 end
+ local limit=math.min(48,960*elapsed)
+ x=math.clamp(x,-limit,limit); y=math.clamp(y,-limit,limit)
+ if relativeInput then
+  local accumulatedX=math.clamp(x+gameAim.carryX,-limit,limit)
+  local accumulatedY=math.clamp(y+gameAim.carryY,-limit,limit)
+  local integerLimit=math.floor(limit)
+  x=math.clamp(math.round(accumulatedX),-integerLimit,integerLimit)
+  y=math.clamp(math.round(accumulatedY),-integerLimit,integerLimit)
+  gameAim.carryX=accumulatedX-x; gameAim.carryY=accumulatedY-y
+ end
+ if x==0 and y==0 then return end
+ local ok,failure=pcall(function()
+  if relativeInput then relativeInput(x,y) else virtualInput:SendMouseDelta(Vector2.new(x,y)) end
+ end)
+ if not ok then
+  gameInputError="Entree souris indisponible : "..string.sub(tostring(failure),1,90)
+  warn("R1 / visee Jeu : "..tostring(failure))
+  resetGameAim(); gameAimMessage=gameInputError; return
+ end
+ if not gameAim.watch then gameAim.watch=rotation; gameAim.watchClock=0 end
+end
 local function planAim(dt)
  if stopped then return end
  updateLocalCharacter()
@@ -1263,11 +1432,16 @@ local function planAim(dt)
   locked=nil; aimClock=AIM_INTERVAL; aimBlocked=false; blockedSince=nil
   releaseCamera(); return
  end
+ if config.Driver=="Jeu" then
+  local ready=gameAimReady()
+  if not ready then locked=nil; aimClock=AIM_INTERVAL; releaseCamera(); return end
+ end
  aimClock+=dt
  -- Liberer une cible morte, hors portee ou retiree sans attendre le prochain scan.
  if locked and not valid(locked) then locked=nil; aimClock=AIM_INTERVAL end
  if aimClock>=AIM_INTERVAL then aimClock=0; acquire(camera) end
  if not valid(locked) then locked=nil; releaseCamera(); return end
+ if config.Driver=="Jeu" then releaseCamera(); return end
  local control=ensureCamera(camera)
  local pivot=characterPivot()
  local origin=control.centered and pivot or camera.CFrame.Position
@@ -1317,8 +1491,8 @@ connect(RunService.PreSimulation,function()
  end
 end)
 connect(Input.WindowFocusReleased,releaseCamera)
-connect(player.CharacterRemoving,function() locked=nil; releaseCamera() end)
-connect(workspace:GetPropertyChangedSignal("CurrentCamera"),function() locked=nil; releaseCamera() end)
+connect(player.CharacterRemoving,function() nativeArmed=false; locked=nil; resetGameAim(); releaseCamera() end)
+connect(workspace:GetPropertyChangedSignal("CurrentCamera"),function() nativeArmed=false; locked=nil; resetGameAim(); releaseCamera() end)
 local function setStatus(value) if status.Text~=value then status.Text=value end end
 connect(RunService.Heartbeat,function(dt)
  if stopped then return end
@@ -1338,6 +1512,7 @@ connect(RunService.Heartbeat,function(dt)
  elseif not localHumanoid or localHumanoid.Health<=0 then setStatus("En attente de ton personnage vivant")
  elseif Input:GetFocusedTextBox() then setStatus("Ferme la saisie de texte pour viser")
  elseif not aiming then setStatus("Maintiens le clic droit / mode "..config.Activation)
+ elseif config.Driver=="Jeu" and gameAimMessage~="" then setStatus(gameAimMessage)
  elseif locked then
   local targetName=locked.bot and "PNJ" or (locked.owner and locked.owner.DisplayName or "Joueur")
   setStatus((aimBlocked and "Obstacle bref : " or "Cible : ")..targetName)
@@ -1353,7 +1528,7 @@ RunService:BindToRenderStep(binding,Enum.RenderPriority.Camera.Value+1,function(
  if plan and control then
   if camera~=plan.camera or control~=plan.control or locked~=plan.record or player.Character~=localCharacter
    or localRoot~=control.root or localHumanoid~=control.humanoid or not aimRequested() or not valid(locked)
-   or localHumanoid.Health<=0 or control.centered~=config.CenterCharacter then
+   or localHumanoid.Health<=0 or control.centered~=config.CenterCharacter or config.Driver~="Camera" then
    releaseCamera()
   else
    if not control.centered then
@@ -1377,12 +1552,14 @@ RunService:BindToRenderStep(binding,Enum.RenderPriority.Camera.Value+1,function(
   for r in activeRecords do updateSkeleton(camera,r) end
  end
 end)
+RunService:BindToRenderStep(binding.."_Game",Enum.RenderPriority.Last.Value+1,stepGameAim)
 local function cleanup()
  if stopped then return end
  stopped=true; weaponReportGeneration+=1
  if weaponReportRun then weaponReportRun.cancel(); weaponReportRun=nil end
  releaseCamera(); RunService:UnbindFromRenderStep(binding)
  RunService:UnbindFromRenderStep(binding.."_Prepare")
+ RunService:UnbindFromRenderStep(binding.."_Game"); resetGameAim()
  for _,c in connections do c:Disconnect() end
  for model in records do remove(model) end
  gui:Destroy()
