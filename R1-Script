@@ -2,6 +2,7 @@
 -- Clic droit maintenu : viser | Inser : menu
 -- PNJ allies : attribut Friendly=true ou TeamName=nom de votre equipe.
 -- ThroughWalls : visee a travers les murs ; la couleur ESP reste basee sur la visibilite.
+-- Visee v2 : camera preparee avant les controles, aucune reecriture du deplacement.
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Input = game:GetService("UserInputService")
@@ -119,7 +120,9 @@ local activeSlider=nil
 local function refreshAll() for _,refresh in refreshers do refresh() end end
 local function changed(key,value)
  if config[key]==value then return end
- config[key]=value; locked=nil; refreshAll()
+ config[key]=value
+ if key=="Aim" or key=="Bots" or key=="TargetPlayers" or key=="TeamCheck" or key=="Part" or key=="Range" then locked=nil end
+ refreshAll()
 end
 local displayValues={Head="Tete",HumanoidRootPart="Torse",Maintenir="Clic droit maintenu",Permanent="Toujours active",Direct="Direct",Fluide="Fluide"}
 local function setting(page,key,title,values,suffix,side)
@@ -182,7 +185,7 @@ setting("Affichage","HealthThickness","Epaisseur barre de vie",{3,5,8,12}," px")
 setting("Affichage","HealthNumbers","Points de vie restants",nil,nil,"right")
 setting("Visee","Aim","Activer la visee")
 setting("Visee","Sticky","Conserver la cible")
-setting("Visee","CenterCharacter","Personnage centre")
+setting("Visee","CenterCharacter","Camera centree sur le personnage")
 setting("Visee","RotateCharacter","Tourner vers la cible")
 setting("Visee","ThroughWalls","Viser a travers les murs")
 setting("Visee","Activation","Activation",{"Maintenir","Permanent"})
@@ -203,7 +206,7 @@ local function note(parent,message,height)
  return item
 end
 note(columns.Affichage.right,"VERT : personnage visible\nROUGE : personnage cache\n\nLa barre de vie passe du rouge au vert selon les points de vie. Les noms des bots sont masques.",116)
-note(columns.Visee.left,"La visee reste sur la cible derriere les murs si l'option est activee. Cela ne modifie pas les collisions des tirs du jeu.",88)
+note(columns.Visee.left,"Le mode Direct suit la position actuelle de la tete. Desactive la camera centree pour garder le zoom et le placement de la camera du jeu. Les deplacements restent geres par le jeu.",110)
 note(columns.Cibles.right,"Les PNJ sont les modeles avec un Humanoid.\n\nPour un PNJ allie : Friendly = true ou TeamName = nom de ton equipe.",110)
 note(columns.Reglages.left,"RACCOURCIS\n\nClic droit maintenu : viser\nInser : ouvrir / fermer\nEn-tete : deplacer le menu\n\nPour alleger l'affichage : 8 personnages et squelette a 10 Hz.",160)
 local reset=make("TextButton",columns.Reglages.left,{Size=UDim2.new(1,0,0,38),Text="Retablir les reglages",BackgroundColor3=rowColor,TextColor3=accent,TextSize=11,Font=Enum.Font.GothamBold,BorderSizePixel=0}); round(reset)
@@ -225,14 +228,13 @@ end)
 connect(Input.InputEnded,function(input) if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then dragging=false end end)
 connect(Input.WindowFocusReleased,function() dragging=false end)
 selectTab("Affichage")
--- Travail espace dans le temps : registre 10 Hz, visee 12,5 Hz, squelette 20 Hz.
--- Seul le mouvement de camera est applique a chaque image.
+-- Registre 10 Hz, recherche de cible 12,5 Hz, squelette 20 Hz.
+-- La cible verrouillee et la camera sont suivies a chaque image.
 local SCAN_INTERVAL, AIM_INTERVAL = 0.1, 0.08
 local VISIBILITY_BUDGET = 4
 local registryList, aimCandidates, displayList, activeRecords = {}, {}, {}, {}
 local localCharacter, localRoot, localHumanoid
 local focused, scanClock, aimClock, boneClock = true, 0, 0, 0
-local rightHeld=false
 local visibilityCursor, selectionMessage = 0, "Maintiens le clic droit"
 local visibleColor, hiddenColor = Color3.fromRGB(65,235,120), Color3.fromRGB(255,65,80)
 local function releaseVisuals(r)
@@ -263,7 +265,7 @@ local function remove(model)
  releaseVisuals(r)
  activeRecords[r]=nil
  records[model]=nil
- if locked==r then locked=nil end
+ if locked==r then locked=nil; aimClock=AIM_INTERVAL end
 end
 local function add(h)
  if stopped or not h:IsA("Humanoid") then return end
@@ -292,15 +294,11 @@ task.defer(function()
  end
 end)
 connect(Input.InputBegan,function(input,processed)
- if input.UserInputType==Enum.UserInputType.MouseButton2 then rightHeld=true end
  if not processed and not Input:GetFocusedTextBox() and input.KeyCode==Enum.KeyCode.Insert then
   panel.Visible=not panel.Visible
  end
 end)
-connect(Input.InputEnded,function(input)
- if input.UserInputType==Enum.UserInputType.MouseButton2 then rightHeld=false end
-end)
-connect(Input.WindowFocusReleased,function() focused=false; rightHeld=false; locked=nil end)
+connect(Input.WindowFocusReleased,function() focused=false; locked=nil end)
 connect(Input.WindowFocused,function() focused=true end)
 local rayParams=RaycastParams.new()
 rayParams.FilterType=Enum.RaycastFilterType.Exclude
@@ -328,9 +326,33 @@ local function partOf(model,name)
  local part=model:FindFirstChild(name)
  return part and part:IsA("BasePart") and part or nil
 end
+local function updateLocalCharacter()
+ localCharacter=player.Character
+ localHumanoid=localCharacter and localCharacter:FindFirstChildOfClass("Humanoid")
+ localRoot=localCharacter and (partOf(localCharacter,"HumanoidRootPart") or localCharacter.PrimaryPart)
+ if localRoot and not localRoot:IsA("BasePart") then localRoot=nil end
+end
+local function isAllied(model,owner)
+ if not config.TeamCheck then return false end
+ if owner then return not player.Neutral and not owner.Neutral and player.Team~=nil and player.Team==owner.Team end
+ return model:GetAttribute("Friendly")==true
+  or (not player.Neutral and player.Team~=nil and model:GetAttribute("TeamName")==player.Team.Name)
+end
 local function valid(r)
- return r and records[r.model]==r and r.eligible and r.humanoid.Health>0
-  and r.aimPart and r.aimPart:IsDescendantOf(workspace)
+ if not r or records[r.model]~=r or r.model==player.Character then return false end
+ if r.humanoid.Parent~=r.model or r.humanoid.Health<=0 or not r.model:IsDescendantOf(workspace) then return false end
+ if not localRoot or not localRoot:IsDescendantOf(workspace) then return false end
+ local owner=Players:GetPlayerFromCharacter(r.model)
+ local bot=owner==nil
+ if owner==player or (bot and not config.Bots) or (not bot and not config.TargetPlayers) or isAllied(r.model,owner) then return false end
+ -- Relire la vraie piece : une tete remplacee ou retiree ne laisse pas une reference perimee.
+ local part=partOf(r.model,config.Part)
+ if not part or not part:IsDescendantOf(workspace) then return false end
+ local root=partOf(r.model,"HumanoidRootPart") or part
+ local distance=(root.Position-localRoot.Position).Magnitude
+ if distance>config.Range then return false end
+ r.aimPart=part; r.owner=owner; r.bot=bot; r.distance=distance
+ return true
 end
 local function screenScore(camera,r)
  if not valid(r) then return nil end
@@ -436,9 +458,7 @@ local function updateSkeleton(camera,r)
  end
 end
 local function scan(camera)
- localCharacter=player.Character
- localRoot=localCharacter and (partOf(localCharacter,"HumanoidRootPart") or localCharacter.PrimaryPart or partOf(localCharacter,"Head"))
- localHumanoid=localCharacter and localCharacter:FindFirstChildOfClass("Humanoid")
+ updateLocalCharacter()
  table.clear(aimCandidates); table.clear(displayList); table.clear(registryList)
  for model,r in records do
   if not model:IsDescendantOf(workspace) or r.humanoid.Parent~=model then remove(model); continue end
@@ -449,12 +469,7 @@ local function scan(camera)
   if owner==player then continue end
   local bot=owner==nil
   if (bot and not config.Bots) or (not bot and not config.TargetPlayers) then continue end
-  local allied=false
-  if config.TeamCheck then
-   if owner then allied=not player.Neutral and not owner.Neutral and player.Team~=nil and player.Team==owner.Team
-   else allied=model:GetAttribute("Friendly")==true or (not player.Neutral and player.Team~=nil and model:GetAttribute("TeamName")==player.Team.Name) end
-  end
-  if allied then continue end
+  if isAllied(model,owner) then continue end
   local root=partOf(model,"HumanoidRootPart") or model.PrimaryPart
   local part=partOf(model,config.Part) or root or partOf(model,"Head")
   if not part or not part:IsA("BasePart") then continue end
@@ -525,28 +540,32 @@ local function scan(camera)
 end
 local shortlist={}
 local blockedSince,aimBlocked=nil,false
-local lastAimRotation,lastAimRecord,lastAimCamera=nil,nil,nil
--- Camera centree derriere le personnage et rotation du corps pendant la visee.
-local cameraControl=nil
+local lastAimRotation,lastAimRecord=nil,nil
+local cameraControl,aimPlan=nil,nil
 local collisionParams=RaycastParams.new()
 collisionParams.FilterType=Enum.RaycastFilterType.Exclude
 collisionParams.IgnoreWater=true
 collisionParams.RespectCanCollide=true
 local collisionFilter={}
+local function releaseBody(control)
+ if control and control.bodyOwned then
+  if control.humanoid.Parent then control.humanoid.AutoRotate=control.originalAutoRotate end
+  control.bodyOwned=false
+ end
+end
 local function releaseCamera()
  local control=cameraControl
- cameraControl=nil
+ cameraControl=nil; aimPlan=nil
  if control then
-  if control.bodyOwned and control.humanoid.Parent then control.humanoid.AutoRotate=control.originalAutoRotate end
-  if control.camera.Parent and control.camera.CameraType==Enum.CameraType.Scriptable then
+  releaseBody(control)
+  if control.ownsCamera and control.camera.Parent and control.camera.CameraType==Enum.CameraType.Scriptable then
    control.camera.CameraType=control.originalType
    control.camera.Focus=control.originalFocus
   end
  end
- lastAimRotation=nil; lastAimRecord=nil; lastAimCamera=nil
+ lastAimRotation=nil; lastAimRecord=nil
 end
 local function characterPivot()
- -- Hauteur stable pour ne pas faire osciller la camera avec les animations de tete.
  return localRoot.Position+Vector3.new(0,localRoot.Size.Y*.75,0)
 end
 local function collisionSafe(camera,pivot,position)
@@ -556,104 +575,56 @@ local function collisionSafe(camera,pivot,position)
  table.insert(collisionFilter,localCharacter); table.insert(collisionFilter,camera)
  collisionParams.FilterDescendantsInstances=collisionFilter
  local hit=workspace:Raycast(pivot,direction,collisionParams)
- if hit then
-  -- Raccourcir le recul sur le meme axe garde le personnage centre.
-  return pivot+direction.Unit*math.max(.05,hit.Distance-.25)
- end
+ if hit then return pivot+direction.Unit*math.max(.05,hit.Distance-.25) end
  return position
 end
-local function controlledPosition(camera)
- if cameraControl and (cameraControl.camera~=camera or cameraControl.root~=localRoot or cameraControl.humanoid~=localHumanoid) then releaseCamera() end
- if not cameraControl then
-  cameraControl={camera=camera,root=localRoot,humanoid=localHumanoid,
-   originalType=camera.CameraType,originalFocus=camera.Focus,
-   originalAutoRotate=localHumanoid.AutoRotate,bodyOwned=false,
-   offset=camera.CFrame.Position-localRoot.Position}
- end
- camera.CameraType=Enum.CameraType.Scriptable
- local pivot=characterPivot()
- if config.CenterCharacter then return pivot end
- return collisionSafe(camera,pivot,localRoot.Position+cameraControl.offset)
-end
-local function followAimWithBody(rotation)
+local function ensureCamera(camera)
  local control=cameraControl
- if not control then return end
- if config.RotateCharacter and not localHumanoid.Sit and not localHumanoid.PlatformStand then
-  local direction=Vector3.new(rotation.LookVector.X,0,rotation.LookVector.Z)
-  if direction.Magnitude>.001 then
-   localHumanoid.AutoRotate=false; control.bodyOwned=true
-   -- Ne modifier que l'orientation horizontale, sans deplacer le personnage.
-   local position=localRoot.Position
-   localRoot.CFrame=CFrame.lookAt(position,position+direction.Unit)
-  end
- elseif control.bodyOwned then
-  localHumanoid.AutoRotate=control.originalAutoRotate; control.bodyOwned=false
+ if control and (control.camera~=camera or control.root~=localRoot or control.humanoid~=localHumanoid or control.centered~=config.CenterCharacter) then
+  releaseCamera(); control=nil
  end
+ if not control then
+  control={camera=camera,root=localRoot,humanoid=localHumanoid,centered=config.CenterCharacter,
+   originalType=camera.CameraType,originalFocus=camera.Focus,
+   originalAutoRotate=localHumanoid.AutoRotate,bodyOwned=false,ownsCamera=config.CenterCharacter}
+  cameraControl=control
+ end
+ if control.ownsCamera then camera.CameraType=Enum.CameraType.Scriptable end
+ return control
 end
--- Lire la commande APRES les controles et AVANT de tourner la camera.
--- Puis la convertir dans le nouveau repere de camera, une seule fois avant la physique.
-local movementIntent,movementReady=Vector3.zero,false
-local movementHumanoid,velocitySupported=nil,nil
-local function cameraAxes(camera)
- local right=Vector3.new(camera.CFrame.RightVector.X,0,camera.CFrame.RightVector.Z)
- if right.Magnitude<.001 then return nil,nil end
+local function aimRotation(origin,target,previous)
+ local direction=target-origin
+ if direction.Magnitude<.001 then return nil end
+ local forward=direction.Unit
+ local right
+ if math.abs(forward.Y)>.995 then
+  -- A la verticale, conserver un repere stable au lieu de retourner la camera.
+  local previousRight=previous.RightVector
+  right=previousRight-forward*previousRight:Dot(forward)
+  if right.Magnitude<.001 then
+   local axis=math.abs(forward.X)<.9 and Vector3.xAxis or Vector3.zAxis
+   right=axis-forward*axis:Dot(forward)
+  end
+ else
+  right=forward:Cross(Vector3.yAxis)
+ end
  right=right.Unit
- return right,Vector3.new(right.Z,0,-right.X)
+ return CFrame.fromMatrix(Vector3.zero,right,right:Cross(forward).Unit,-forward)
 end
-local function intendedVelocity(humanoid) return humanoid:GetMoveVelocity() end
-RunService:BindToRenderStep(binding.."_Movement",Enum.RenderPriority.Input.Value+1,function()
- movementReady=false
- if stopped or not focused or not aiming or not cameraControl or Input:GetFocusedTextBox() then return end
- local camera=workspace.CurrentCamera
- local humanoid=localHumanoid
- if not camera or not humanoid or humanoid.Parent~=player.Character or humanoid.Health<=0 then return end
- if humanoid.Sit or humanoid.PlatformStand then return end
- local right,forward=cameraAxes(camera)
- if not right then return end
- if movementHumanoid~=humanoid then movementHumanoid=humanoid; velocitySupported=nil end
- local move=humanoid.MoveDirection
- -- Conserver aussi la vitesse analogique lorsqu'elle est disponible.
- if velocitySupported~=false then
-  local ok,velocity=pcall(intendedVelocity,humanoid)
-  velocitySupported=ok
-  if ok then move=humanoid.WalkSpeed>0 and velocity/humanoid.WalkSpeed or Vector3.zero end
- end
- move=Vector3.new(move.X,0,move.Z)
- if move.Magnitude>1 then move=move.Unit end
- movementIntent=Vector3.new(move:Dot(right),0,-move:Dot(forward))
- movementReady=true
-end)
-connect(RunService.PreSimulation,function()
- if stopped or not focused or not aiming or not cameraControl or not valid(locked) then return end
- local camera=workspace.CurrentCamera
- if not camera or camera~=cameraControl.camera or localCharacter~=player.Character then return end
- if not localHumanoid or localHumanoid.Health<=0 or localHumanoid.Sit or localHumanoid.PlatformStand then return end
- if not localRoot or not localRoot:IsDescendantOf(workspace) then return end
- if movementReady then
-  local right,forward=cameraAxes(camera)
-  if right then
-   local direction=right*movementIntent.X-forward*movementIntent.Z
-   localHumanoid:Move(direction,false)
-  end
- end
- -- La rotation du corps intervient avant la physique, pas pendant le rendu.
- followAimWithBody(camera.CFrame.Rotation)
-end)
-connect(Input.WindowFocusReleased,releaseCamera)
-connect(player.CharacterRemoving,function() locked=nil; releaseCamera() end)
-connect(workspace:GetPropertyChangedSignal("CurrentCamera"),releaseCamera)
+local function aimRequested()
+ return focused and config.Aim and not Input:GetFocusedTextBox()
+  and (config.Activation=="Permanent" or Input:IsMouseButtonPressed(Enum.UserInputType.MouseButton2))
+end
 local function acquire(camera)
- -- Le rayon sert a choisir une cible, pas a changer de personnage pendant le suivi.
- if config.Sticky and valid(locked) then
-  if config.ThroughWalls or clearTo(camera,locked.model,locked.aimPart.Position) then
-   blockedSince=nil; aimBlocked=false; return
-  end
-  -- Un obstacle tres bref ne provoque pas un saut vers une autre tete.
-  blockedSince=blockedSince or os.clock()
-  aimBlocked=true
-  if os.clock()-blockedSince<0.18 then return end
+ local previous=valid(locked) and locked or nil
+ local previousClear=previous and (config.ThroughWalls or clearTo(camera,previous.model,previous.aimPart.Position))
+ if previous and config.Sticky then
+  if previousClear then blockedSince=nil; aimBlocked=false; return end
+  blockedSince=blockedSince or os.clock(); aimBlocked=true
+  if os.clock()-blockedSince<.18 then return end
+  previous=nil
  end
- locked=nil; blockedSince=nil; aimBlocked=false
+ blockedSince=nil; aimBlocked=false
  table.clear(shortlist)
  for _,r in aimCandidates do
   local score=screenScore(camera,r)
@@ -667,11 +638,84 @@ local function acquire(camera)
    end
   end
  end
+ local candidate=nil
  for _,r in shortlist do
-  if config.ThroughWalls or clearTo(camera,r.model,r.aimPart.Position) then locked=r; break end
+  if config.ThroughWalls or clearTo(camera,r.model,r.aimPart.Position) then candidate=r; break end
  end
+ -- Sans verrouillage, une marge evite les sauts entre deux tetes presque superposees.
+ if previous and previousClear then
+  local oldScore=screenScore(camera,previous)
+  if oldScore and (not candidate or candidate==previous or candidate.score+4>=oldScore) then candidate=previous end
+ end
+ locked=candidate
  selectionMessage=#shortlist==0 and "Aucune cible dans le rayon / verifie Cibles" or "Cible bloquee par un obstacle"
 end
+local function planAim(dt)
+ if stopped then return end
+ updateLocalCharacter()
+ local camera=workspace.CurrentCamera
+ aiming=aimRequested()
+ if not camera or not aiming or not localHumanoid or localHumanoid.Health<=0
+  or not localRoot or not localRoot:IsDescendantOf(workspace) then
+  locked=nil; aimClock=AIM_INTERVAL; aimBlocked=false; blockedSince=nil
+  releaseCamera(); return
+ end
+ aimClock+=dt
+ -- Liberer une cible morte, hors portee ou retiree sans attendre le prochain scan.
+ if locked and not valid(locked) then locked=nil; aimClock=AIM_INTERVAL end
+ if aimClock>=AIM_INTERVAL then aimClock=0; acquire(camera) end
+ if not valid(locked) then locked=nil; releaseCamera(); return end
+ local control=ensureCamera(camera)
+ local pivot=characterPivot()
+ local origin=control.centered and pivot or camera.CFrame.Position
+ local targetPosition=locked.aimPart.Position
+ local desired=aimRotation(origin,targetPosition,lastAimRotation or camera.CFrame.Rotation)
+ if not desired then releaseCamera(); return end
+ if lastAimRecord~=locked then lastAimRotation=camera.CFrame.Rotation; lastAimRecord=locked end
+ if not aimBlocked then
+  if config.Tracking=="Direct" then lastAimRotation=desired
+  else lastAimRotation=lastAimRotation:Lerp(desired,1-math.exp(-config.Smooth*math.max(dt,0))) end
+ end
+ local position=control.centered and collisionSafe(camera,pivot,pivot-lastAimRotation.LookVector*config.AimDistance) or origin
+ aimPlan=aimPlan or {}
+ aimPlan.camera=camera; aimPlan.control=control; aimPlan.record=locked
+ aimPlan.frame=CFrame.new(position)*lastAimRotation
+ aimPlan.focus=control.centered and CFrame.new(pivot) or camera.Focus
+ aimPlan.target=targetPosition
+ camera.CFrame=aimPlan.frame
+ if control.centered then camera.Focus=aimPlan.focus end
+end
+-- Les controles Roblox (priorite Input) lisent deja la direction de visee.
+-- Aucun GetMoveVelocity / Humanoid:Move : le jeu conserve ses commandes de deplacement.
+RunService:BindToRenderStep(binding.."_Prepare",Enum.RenderPriority.Input.Value-1,planAim)
+local blockedBodyStates={
+ [Enum.HumanoidStateType.Dead]=true,[Enum.HumanoidStateType.Seated]=true,
+ [Enum.HumanoidStateType.Physics]=true,[Enum.HumanoidStateType.Ragdoll]=true,
+ [Enum.HumanoidStateType.FallingDown]=true,[Enum.HumanoidStateType.GettingUp]=true,
+ [Enum.HumanoidStateType.Swimming]=true,[Enum.HumanoidStateType.Climbing]=true,
+}
+connect(RunService.PreSimulation,function()
+ local control=cameraControl
+ if not control then return end
+ if stopped or not aimRequested() or not aimPlan or control~=aimPlan.control or workspace.CurrentCamera~=control.camera
+  or player.Character~=localCharacter or not valid(locked) or control.humanoid~=localHumanoid or control.root~=localRoot then
+  releaseCamera(); return
+ end
+ local humanoid=control.humanoid
+ if not config.RotateCharacter or humanoid.Health<=0 or humanoid.Sit or humanoid.PlatformStand
+  or localRoot.Anchored or blockedBodyStates[humanoid:GetState()] then releaseBody(control); return end
+ local look=aimPlan.frame.LookVector
+ local direction=Vector3.new(look.X,0,look.Z)
+ if direction.Magnitude<.1 then return end
+ humanoid.AutoRotate=false; control.bodyOwned=true
+ local current=localRoot.CFrame
+ if current.LookVector:Dot(direction.Unit)<.99999 then
+  localRoot.CFrame=CFrame.lookAt(current.Position,current.Position+direction.Unit)
+ end
+end)
+connect(Input.WindowFocusReleased,releaseCamera)
+connect(player.CharacterRemoving,function() locked=nil; releaseCamera() end)
+connect(workspace:GetPropertyChangedSignal("CurrentCamera"),function() locked=nil; releaseCamera() end)
 local function setStatus(value) if status.Text~=value then status.Text=value end end
 connect(RunService.Heartbeat,function(dt)
  if stopped then return end
@@ -697,56 +741,35 @@ connect(RunService.Heartbeat,function(dt)
  else setStatus(selectionMessage) end
  stroke.Color=locked and visibleColor or accent
 end)
-RunService:BindToRenderStep(binding,Enum.RenderPriority.Last.Value,function(dt)
+-- Reappliquer le meme plan apres la camera standard, sans doubler le lissage.
+RunService:BindToRenderStep(binding,Enum.RenderPriority.Camera.Value+1,function(dt)
  if stopped then return end
  local camera=workspace.CurrentCamera
- if not camera then releaseCamera(); return end
- -- Lecture directe : le clic droit reste detecte meme s'il est consomme par la camera Roblox.
- aiming=focused and config.Aim and not Input:GetFocusedTextBox()
-  and (config.Activation=="Permanent" or rightHeld or Input:IsMouseButtonPressed(Enum.UserInputType.MouseButton2))
- local canAim=aiming and localHumanoid and localHumanoid.Health>0
-  and localCharacter==player.Character and localRoot and localRoot:IsDescendantOf(workspace)
- aimClock+=dt
- if canAim then
-  if aimClock>=AIM_INTERVAL then aimClock=0; acquire(camera) end
-  if valid(locked) then
-   local position=controlledPosition(camera)
-   local targetPosition=locked.aimPart.Position
-   if (targetPosition-position).Magnitude>.001 then
-    local desired=CFrame.lookAt(position,targetPosition).Rotation
-    if lastAimRecord~=locked or lastAimCamera~=camera then
-     lastAimRotation=camera.CFrame.Rotation
-     lastAimRecord=locked; lastAimCamera=camera
-    end
-    if not aimBlocked then
-     if config.Tracking=="Direct" then
-      -- La tete est suivie a chaque image, sans retard de lissage.
-      lastAimRotation=desired
-     else
-      -- Partir de notre derniere rotation, pas de celle reinitialisee par la camera Roblox.
-      lastAimRotation=lastAimRotation:Lerp(desired,1-math.exp(-config.Smooth*math.min(dt,0.1)))
-      if lastAimRotation.LookVector:Dot(desired.LookVector)>0.999998 then lastAimRotation=desired end
-     end
-    end
-    -- Pendant une obstruction breve, conserver la direction sans suivre a travers le mur.
-    local pivot=characterPivot()
-    if config.CenterCharacter then
-     position=collisionSafe(camera,pivot,pivot-lastAimRotation.LookVector*config.AimDistance)
-    end
-    camera.CFrame=CFrame.new(position)*lastAimRotation
-    camera.Focus=CFrame.new(config.CenterCharacter and pivot or targetPosition)
-   else
-    releaseCamera()
-   end
+ local plan=aimPlan
+ local control=cameraControl
+ if plan and control then
+  if camera~=plan.camera or control~=plan.control or locked~=plan.record or player.Character~=localCharacter
+   or localRoot~=control.root or localHumanoid~=control.humanoid or not aimRequested() or not valid(locked)
+   or localHumanoid.Health<=0 or control.centered~=config.CenterCharacter then
+   releaseCamera()
   else
-   locked=nil; releaseCamera()
+   if not control.centered then
+    -- Le jeu garde le zoom, le placement et le Focus de sa camera.
+    local nativePosition=camera.CFrame.Position
+    local rotation=plan.frame.Rotation
+    if config.Tracking=="Direct" and not aimBlocked then
+     rotation=aimRotation(nativePosition,plan.target,rotation) or rotation
+    end
+    plan.frame=CFrame.new(nativePosition)*rotation
+   else
+    camera.CameraType=Enum.CameraType.Scriptable
+    camera.Focus=plan.focus
+   end
+   camera.CFrame=plan.frame
   end
- else
-  locked=nil; aimClock=AIM_INTERVAL; aimBlocked=false; blockedSince=nil
-  releaseCamera()
  end
  boneClock+=dt
- if boneClock>=1/config.SkeletonFPS then
+ if camera and boneClock>=1/config.SkeletonFPS then
   boneClock=0
   for r in activeRecords do updateSkeleton(camera,r) end
  end
@@ -754,7 +777,7 @@ end)
 local function cleanup()
  if stopped then return end
  stopped=true; releaseCamera(); RunService:UnbindFromRenderStep(binding)
- RunService:UnbindFromRenderStep(binding.."_Movement")
+ RunService:UnbindFromRenderStep(binding.."_Prepare")
  for _,c in connections do c:Disconnect() end
  for model in records do remove(model) end
  gui:Destroy()
