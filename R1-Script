@@ -590,6 +590,55 @@ local function followAimWithBody(rotation)
   localHumanoid.AutoRotate=control.originalAutoRotate; control.bodyOwned=false
  end
 end
+-- Lire la commande APRES les controles et AVANT de tourner la camera.
+-- Puis la convertir dans le nouveau repere de camera, une seule fois avant la physique.
+local movementIntent,movementReady=Vector3.zero,false
+local movementHumanoid,velocitySupported=nil,nil
+local function cameraAxes(camera)
+ local right=Vector3.new(camera.CFrame.RightVector.X,0,camera.CFrame.RightVector.Z)
+ if right.Magnitude<.001 then return nil,nil end
+ right=right.Unit
+ return right,Vector3.new(right.Z,0,-right.X)
+end
+local function intendedVelocity(humanoid) return humanoid:GetMoveVelocity() end
+RunService:BindToRenderStep(binding.."_Movement",Enum.RenderPriority.Input.Value+1,function()
+ movementReady=false
+ if stopped or not focused or not aiming or not cameraControl or Input:GetFocusedTextBox() then return end
+ local camera=workspace.CurrentCamera
+ local humanoid=localHumanoid
+ if not camera or not humanoid or humanoid.Parent~=player.Character or humanoid.Health<=0 then return end
+ if humanoid.Sit or humanoid.PlatformStand then return end
+ local right,forward=cameraAxes(camera)
+ if not right then return end
+ if movementHumanoid~=humanoid then movementHumanoid=humanoid; velocitySupported=nil end
+ local move=humanoid.MoveDirection
+ -- Conserver aussi la vitesse analogique lorsqu'elle est disponible.
+ if velocitySupported~=false then
+  local ok,velocity=pcall(intendedVelocity,humanoid)
+  velocitySupported=ok
+  if ok then move=humanoid.WalkSpeed>0 and velocity/humanoid.WalkSpeed or Vector3.zero end
+ end
+ move=Vector3.new(move.X,0,move.Z)
+ if move.Magnitude>1 then move=move.Unit end
+ movementIntent=Vector3.new(move:Dot(right),0,-move:Dot(forward))
+ movementReady=true
+end)
+connect(RunService.PreSimulation,function()
+ if stopped or not focused or not aiming or not cameraControl or not valid(locked) then return end
+ local camera=workspace.CurrentCamera
+ if not camera or camera~=cameraControl.camera or localCharacter~=player.Character then return end
+ if not localHumanoid or localHumanoid.Health<=0 or localHumanoid.Sit or localHumanoid.PlatformStand then return end
+ if not localRoot or not localRoot:IsDescendantOf(workspace) then return end
+ if movementReady then
+  local right,forward=cameraAxes(camera)
+  if right then
+   local direction=right*movementIntent.X-forward*movementIntent.Z
+   localHumanoid:Move(direction,false)
+  end
+ end
+ -- La rotation du corps intervient avant la physique, pas pendant le rendu.
+ followAimWithBody(camera.CFrame.Rotation)
+end)
 connect(Input.WindowFocusReleased,releaseCamera)
 connect(player.CharacterRemoving,function() locked=nil; releaseCamera() end)
 connect(workspace:GetPropertyChangedSignal("CurrentCamera"),releaseCamera)
@@ -680,7 +729,6 @@ RunService:BindToRenderStep(binding,Enum.RenderPriority.Last.Value,function(dt)
      end
     end
     -- Pendant une obstruction breve, conserver la direction sans suivre a travers le mur.
-    followAimWithBody(lastAimRotation)
     local pivot=characterPivot()
     if config.CenterCharacter then
      position=collisionSafe(camera,pivot,pivot-lastAimRotation.LookVector*config.AimDistance)
@@ -706,6 +754,7 @@ end)
 local function cleanup()
  if stopped then return end
  stopped=true; releaseCamera(); RunService:UnbindFromRenderStep(binding)
+ RunService:UnbindFromRenderStep(binding.."_Movement")
  for _,c in connections do c:Disconnect() end
  for model in records do remove(model) end
  gui:Destroy()
