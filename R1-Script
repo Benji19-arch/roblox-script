@@ -240,14 +240,16 @@ local stopped=false
 local connections={}
 local seen,seenTools,weaponNames={},{},{}
 local queue,queueIndex={},1
+local priorityQueue,priorityIndex={},1
+local seenModels={}
 local muzzleRefs,tracks,seenProjectiles={},{},{}
 local sourceReadable=nil
 local sourceAttempts,sourceBytes,genericScripts=0,0,0
 local playerScripts=player:FindFirstChild("PlayerScripts")
 local lastActivation=nil
-local report={format="R1-WEAPON-INSPECTOR-1",placeId=game.PlaceId,gravity=workspace.Gravity,
- tools={},scripts={},remotes={},parameters={},muzzles={},activations={},mousePresses={},projectileCandidates={},
- stats={visited=0,queued=0,queueLimited=false,scriptsLimited=false,parametersLimited=false,remotesLimited=false},
+local report={format="R1-WEAPON-INSPECTOR-2",placeId=game.PlaceId,gravity=workspace.Gravity,
+ tools={},modelCandidates={},scripts={},remotes={},parameters={},muzzles={},activations={},mousePresses={},projectileCandidates={},truncatedScopes={},
+ stats={visited=0,priorityVisited=0,queued=0,queueLimited=false,queueBudgetLimited=false,childrenLimited=false,scriptsLimited=false,parametersLimited=false,remotesLimited=false},
  notes={
   "Observation locale uniquement : aucun tir ni appel distant n'est effectue par l'inspecteur.",
   "Les scripts et remotes listes sont des candidats identifies par contexte/nom, pas une preuve de leur role.",
@@ -309,7 +311,8 @@ local function containsWord(name,words)
  return false
 end
 local function weaponContext(name)
- if containsWord(name,weaponWords) then return true end
+ local normalizedName=normalized(name)
+ if normalizedName=="tps" or normalizedName=="tpsclient" or containsWord(name,weaponWords) then return true end
  local key=normalized(name)
  for known in weaponNames do if string.find(key,known,1,true) then return true end end
  return false
@@ -330,12 +333,46 @@ local function pathOf(obj)
  end
  return clip(table.concat(names,"/"),240)
 end
-local function enqueue(obj,context)
- if not obj or seen[obj] then return end
- if #queue>=MAX_QUEUE then report.stats.queueLimited=true; return end
- seen[obj]=true
- table.insert(queue,{object=obj,context=context})
+local function noteLimit(obj,reason,omitted)
+ report.stats.queueLimited=true
+ if #report.truncatedScopes<12 then table.insert(report.truncatedScopes,{path=pathOf(obj),reason=reason,omitted=omitted}) end
+end
+local function enqueue(obj,context,priority)
+ if not obj then return end
+ priority=priority==true or context==true
+ local existing=seen[obj]
+ if existing then
+  if context then existing.context=true end
+  if priority and not existing.priority and not existing.processed then
+   existing.priority=true; table.insert(priorityQueue,existing)
+  end
+  return
+ end
+ if #queue>=MAX_QUEUE then
+  report.stats.queueBudgetLimited=true
+  noteLimit(obj,"total_queue_budget",1); return
+ end
+ local item={object=obj,context=context,priority=priority,processed=false}
+ seen[obj]=item; table.insert(queue,item)
+ if priority then table.insert(priorityQueue,item) end
  report.stats.queued=#queue
+end
+local function nextWork()
+ if priorityIndex<=#priorityQueue then
+  local item=priorityQueue[priorityIndex]; priorityIndex+=1; return item
+ elseif queueIndex<=#queue then
+  local item=queue[queueIndex]; queueIndex+=1; return item
+ end
+ return nil
+end
+local function rememberModel(obj)
+ if seenModels[obj] or #report.modelCandidates>=12 then return end
+ seenModels[obj]=true
+ table.insert(report.modelCandidates,{path=pathOf(obj),class=obj.ClassName,role="unconfirmed"})
+end
+local function seedTPS()
+ if playerScripts then enqueue(playerScripts:FindFirstChild("TPS_Client"),true,true) end
+ enqueue(ReplicatedStorage:FindFirstChild("TPS"),true,true)
 end
 local function addParameter(obj,key,value,kind)
  if #report.parameters>=MAX_PARAMETERS then report.stats.parametersLimited=true; return end
@@ -357,6 +394,7 @@ local function addScript(obj,context)
  local ok,source=pcall(function() return obj.Source end)
  if not ok or typeof(source)~="string" then
   entry.sourceStatus="protected_or_unavailable"
+  if not ok then entry.sourceError=clip(source,180) end
   if sourceReadable==nil then sourceReadable=false end
   return
  end
@@ -367,10 +405,13 @@ local function addScript(obj,context)
  sourceBytes+=#kept
 end
 local function rememberMuzzle(obj)
- if #muzzleRefs>=8 then return end
  if not obj:IsA("Attachment") and not obj:IsA("BasePart") then return end
  if not containsWord(obj.Name,{"muzzle","barrel","firepoint","shootpoint","gunpoint","bulletoffset","bulletorigin","guntip"}) then return end
- table.insert(muzzleRefs,obj)
+ for _,known in muzzleRefs do if known==obj then return end end
+ if obj:IsDescendantOf(workspace) then
+  table.insert(muzzleRefs,1,obj)
+  if #muzzleRefs>8 then table.remove(muzzleRefs) end
+ elseif #muzzleRefs<8 then table.insert(muzzleRefs,obj) end
 end
 local function observeTool(tool)
  if seenTools[tool] or #report.tools>=8 then return end
@@ -396,7 +437,7 @@ local function discoverTools()
   for i,obj in character:GetChildren() do
    if i>80 then break end
    if obj:IsA("Tool") then observeTool(obj)
-   elseif obj:IsA("Model") and weaponContext(obj.Name) then enqueue(obj,true) end
+   elseif obj:IsA("Model") then rememberModel(obj); enqueue(obj,true,true) end
   end
  end
  local backpack=player:FindFirstChildOfClass("Backpack")
@@ -410,7 +451,7 @@ local function discoverTools()
  if camera then
   for i,obj in camera:GetChildren() do
    if i>32 then break end
-   if obj:IsA("Model") or obj:IsA("Tool") then enqueue(obj,true) end
+   if obj:IsA("Model") or obj:IsA("Tool") then rememberModel(obj); enqueue(obj,true,true) end
   end
  end
 end
@@ -439,9 +480,14 @@ local function inspectNode(item)
   end
  end
  local children=obj:GetChildren()
+ local childLimit=item.priority and 1024 or 256
+ if #children>childLimit then
+  report.stats.childrenLimited=true
+  noteLimit(obj,"children_per_parent",#children-childLimit)
+ end
  for i,child in children do
-  if i>256 then report.stats.queueLimited=true; break end
-  enqueue(child,context)
+  if i>childLimit then break end
+  enqueue(child,context,item.priority)
  end
 end
 local function projectileSample(track,now)
@@ -503,7 +549,7 @@ local function captureMuzzles()
 end
 local function clearState()
  table.clear(tracks); table.clear(queue); table.clear(seen); table.clear(seenTools)
- table.clear(muzzleRefs); table.clear(seenProjectiles)
+ table.clear(muzzleRefs); table.clear(seenProjectiles); table.clear(priorityQueue); table.clear(seenModels)
 end
 local function cancel()
  if stopped then return end
@@ -517,7 +563,8 @@ local function finish(reason)
  captureMuzzles()
  report.stats.sourceAttempts=sourceAttempts; report.stats.sourceBytes=sourceBytes
  report.stats.sourceReadable=sourceReadable==true
- report.stats.pendingNodes=math.max(0,#queue-queueIndex+1)
+ report.stats.sourceAccess=sourceAttempts==0 and "not_attempted" or (sourceReadable==true and (sourceBytes>0 and "readable" or "empty_or_unavailable") or "protected_or_unavailable")
+ report.stats.pendingNodes=math.max(0,report.stats.queued-report.stats.visited)
  local json=Http:JSONEncode(report)
  if #json>MAX_REPORT_BYTES then
   report.reportTruncated=true
@@ -553,16 +600,20 @@ connect(RunService.Heartbeat,function(dt)
  if stopped then return end
  local ok,failure=pcall(function()
   if needsSetup then
-   discoverTools(); enqueue(playerScripts,false); enqueue(ReplicatedStorage,false); needsSetup=false
+   seedTPS(); discoverTools(); enqueue(playerScripts,false); enqueue(ReplicatedStorage,false); needsSetup=false
   end
   local deadline=os.clock()+.002
   for _=1,32 do
-   if queueIndex>#queue or os.clock()>deadline then break end
-   local item=queue[queueIndex]; queueIndex+=1
-   inspectNode(item); report.stats.visited+=1
+   if os.clock()>deadline then break end
+   local item=nextWork()
+   if not item then break end
+   if not item.processed then
+    item.processed=true; inspectNode(item); report.stats.visited+=1
+    if item.priority then report.stats.priorityVisited+=1 end
+   end
   end
   discoverClock+=dt; sampleClock+=dt; uiClock+=dt
-  if discoverClock>=1 then discoverClock=0; discoverTools() end
+  if discoverClock>=1 then discoverClock=0; seedTPS(); discoverTools() end
   if sampleClock>=.1 then
    sampleClock=0
    local now=os.clock()
