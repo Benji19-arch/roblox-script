@@ -73,9 +73,10 @@ local menu=make("TextButton",gui,{Name="Menu",Position=UDim2.fromOffset(18,18),S
 round(menu); make("UIStroke",menu,{Color=accent,Thickness=1})
 connect(menu.Activated,function() panel.Visible=not panel.Visible end)
 local pages,buttons,indicators,columns,topButtons={},{},{},{},{}
-local titles={Affichage="Visuels",Visee="Aimbot",Cibles="Cibles",Reglages="Session"}
-local topTitles={Affichage="Joueurs / PNJ",Visee="Visee",Cibles="Cibles",Reglages="Reglages"}
-local descriptions={Affichage="Silhouette, squelette et informations des personnages",Visee="Activation, suivi de la tete et obstacles",Cibles="Choisis les joueurs et les PNJ a suivre",Reglages="Performances, raccourcis et reinitialisation"}
+local tabOrder={"Affichage","Visee","Cibles","Reglages","Rapport"}
+local titles={Affichage="Visuels",Visee="Aimbot",Cibles="Cibles",Reglages="Session",Rapport="Rapport"}
+local topTitles={Affichage="Joueurs / PNJ",Visee="Visee",Cibles="Cibles",Reglages="Reglages",Rapport="Rapport"}
+local descriptions={Affichage="Silhouette, squelette et informations des personnages",Visee="Activation, suivi de la tete et obstacles",Cibles="Choisis les joueurs et les PNJ a suivre",Reglages="Performances, raccourcis et reinitialisation",Rapport="Collecte des donnees de l arme et rapport a copier"}
 local function selectTab(name)
  heading.Text=titles[name]; subtitle.Text=descriptions[name]
  for key,page in pages do
@@ -95,7 +96,7 @@ local function column(parent,x,title)
  local caption=label(scroll,title,UDim2.new(),UDim2.new(1,0,0,24)); caption.Font=Enum.Font.GothamBold; caption.TextSize=12
  return scroll
 end
-for index,name in {"Affichage","Visee","Cibles","Reglages"} do
+for index,name in tabOrder do
  local b=make("TextButton",sidebar,{Position=UDim2.fromOffset(12,73+(index-1)*32),Size=UDim2.fromOffset(131,29),Text=titles[name],TextXAlignment=Enum.TextXAlignment.Left,TextSize=13,Font=Enum.Font.GothamMedium,BackgroundColor3=sidebar.BackgroundColor3,TextColor3=muted,BorderSizePixel=0,AutoButtonColor=false})
  make("UIPadding",b,{PaddingLeft=UDim.new(0,33)})
  local icon=make("Frame",b,{Position=UDim2.fromOffset(13,9),Size=UDim2.fromOffset(13,11),BackgroundTransparency=1,BorderSizePixel=0})
@@ -109,8 +110,8 @@ for index,name in {"Affichage","Visee","Cibles","Reglages"} do
  local marker=make("Frame",b,{Position=UDim2.fromOffset(5,8),Size=UDim2.fromOffset(2,13),BackgroundColor3=accent,BorderSizePixel=0})
  local page=make("Frame",panel,{Name=name,Position=UDim2.fromOffset(162,48),Size=UDim2.new(1,-176,1,-104),BackgroundTransparency=1,Visible=false})
  pages[name],buttons[name],indicators[name]=page,b,marker
- columns[name]={left=column(page,0,titles[name]),right=column(page,.5,"Settings")}
- local top=make("TextButton",topBar,{Position=UDim2.new((index-1)*.25,0,0,0),Size=UDim2.new(.25,-6,1,0),Text=topTitles[name],TextSize=11,Font=Enum.Font.GothamMedium,TextColor3=muted,BackgroundColor3=card,BorderSizePixel=0,AutoButtonColor=false})
+ if name~="Rapport" then columns[name]={left=column(page,0,titles[name]),right=column(page,.5,"Settings")} end
+ local top=make("TextButton",topBar,{Position=UDim2.new((index-1)/#tabOrder,0,0,0),Size=UDim2.new(1/#tabOrder,-6,1,0),Text=topTitles[name],TextSize=11,Font=Enum.Font.GothamMedium,TextColor3=muted,BackgroundColor3=card,BorderSizePixel=0,AutoButtonColor=false})
  make("UICorner",top,{CornerRadius=UDim.new(0,3)})
  topButtons[name]=top
  connect(b.Activated,function() selectTab(name) end)
@@ -227,7 +228,403 @@ connect(Input.InputChanged,function(input)
 end)
 connect(Input.InputEnded,function(input) if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then dragging=false end end)
 connect(Input.WindowFocusReleased,function() dragging=false end)
-selectTab("Affichage")
+-- Collecteur encapsule : toutes ses observations sont arretees a la fin / annulation.
+local function startWeaponReport(onProgress,onComplete)
+local Http=game:GetService("HttpService")
+local ReplicatedStorage=game:GetService("ReplicatedStorage")
+local DURATION=12
+local MAX_QUEUE,MAX_SCRIPTS,MAX_REMOTES,MAX_PARAMETERS=3000,48,32,96
+local MAX_SOURCE_ATTEMPTS,MAX_SOURCE_BYTES,MAX_REPORT_BYTES=6,24000,160000
+local started=os.clock()
+local stopped=false
+local connections={}
+local seen,seenTools,weaponNames={},{},{}
+local queue,queueIndex={},1
+local muzzleRefs,tracks,seenProjectiles={},{},{}
+local sourceReadable=nil
+local sourceAttempts,sourceBytes,genericScripts=0,0,0
+local playerScripts=player:FindFirstChild("PlayerScripts")
+local lastActivation=nil
+local report={format="R1-WEAPON-INSPECTOR-1",placeId=game.PlaceId,gravity=workspace.Gravity,
+ tools={},scripts={},remotes={},parameters={},muzzles={},activations={},mousePresses={},projectileCandidates={},
+ stats={visited=0,queued=0,queueLimited=false,scriptsLimited=false,parametersLimited=false,remotesLimited=false},
+ notes={
+  "Observation locale uniquement : aucun tir ni appel distant n'est effectue par l'inspecteur.",
+  "Les scripts et remotes listes sont des candidats identifies par contexte/nom, pas une preuve de leur role.",
+  "Source n'est lu que si les permissions normales le permettent ; aucun decompilateur ni require.",
+  "Le code serveur et les sources protegees ne sont pas recuperables depuis un LocalScript standard.",
+  "Tool.Activated et les clics ne prouvent pas qu'un tir a ete accepte par le serveur.",
+  "Les projectiles candidats ne sont pas attribues avec certitude a ton arme et peuvent etre des effets visuels.",
+  "Aucun projectile observe ne prouve pas un tir hitscan : Beam/Trail, pooling et objets tres brefs peuvent etre manques.",
+  "Vitesse physique et vitesse observee sont distinctes ; un objet deplace par CFrame peut avoir une vitesse physique nulle.",
+  "Les parcours, sources et echantillons sont limites pour reduire le cout sur les FPS.",
+ }}
+local function connect(signal,callback)
+ local c=signal:Connect(callback); table.insert(connections,c); return c
+end
+local function disconnectAll()
+ for _,c in connections do c:Disconnect() end
+ table.clear(connections)
+end
+local function clip(value,limit)
+ local text=tostring(value):gsub("[%z\1-\8\11\12\14-\31]","?")
+ if not utf8.len(text) then text=text:gsub("[^%g%s]","?") end
+ if #text<=limit then return text end
+ local cut=limit
+ while cut>0 do
+  local byte=string.byte(text,cut+1)
+  if not byte or byte<128 or byte>191 then break end
+  cut-=1
+ end
+ return string.sub(text,1,cut)
+end
+local function number(n)
+ if n~=n or n==math.huge or n==-math.huge then return tostring(n) end
+ if math.abs(n)>1e12 then return n end
+ return math.round(n*1000)/1000
+end
+local function vector(v) return {number(v.X),number(v.Y),number(v.Z)} end
+local function frame(cf)
+ local values={cf:GetComponents()}
+ for i,v in values do values[i]=number(v) end
+ return values
+end
+local function pack(value)
+ local kind=typeof(value)
+ if kind=="number" then return number(value)
+ elseif kind=="string" then return clip(value,160)
+ elseif kind=="boolean" then return value
+ elseif kind=="Vector3" then return vector(value)
+ elseif kind=="CFrame" then return frame(value)
+ elseif kind=="EnumItem" then return tostring(value) end
+ return nil
+end
+local function normalized(name) return string.lower(name):gsub("[^%w]","") end
+local weaponWords={"weapon","gun","rifle","pistol","bullet","projectile","ballistic","fastcast","raycast","shoot","firearm","viewmodel"}
+local parameterWords={"bullet","projectile","muzzle","gravity","drop","range","spread","recoil","firerate","fireinterval","ammo","damage","velocity","speed","penetration","raycast","hitscan"}
+local projectileWords={"bullet","projectile","tracer","pellet","missile","rocket"}
+local function containsWord(name,words)
+ local key=normalized(name)
+ for _,word in words do if string.find(key,word,1,true) then return true end end
+ return false
+end
+local function weaponContext(name)
+ if containsWord(name,weaponWords) then return true end
+ local key=normalized(name)
+ for known in weaponNames do if string.find(key,known,1,true) then return true end end
+ return false
+end
+local function pathOf(obj)
+ local names={}
+ for _=1,12 do
+  if not obj then break end
+  local alias=nil
+  if obj==player.Character then alias="[Character]"
+  elseif obj==workspace.CurrentCamera then alias="[Camera]"
+  elseif obj==player then alias="[LocalPlayer]"
+  elseif obj==ReplicatedStorage then alias="ReplicatedStorage"
+  elseif obj==workspace then alias="Workspace" end
+  table.insert(names,1,alias or clip(obj.Name,60))
+  if alias then break end
+  obj=obj.Parent
+ end
+ return clip(table.concat(names,"/"),240)
+end
+local function enqueue(obj,context)
+ if not obj or seen[obj] then return end
+ if #queue>=MAX_QUEUE then report.stats.queueLimited=true; return end
+ seen[obj]=true
+ table.insert(queue,{object=obj,context=context})
+ report.stats.queued=#queue
+end
+local function addParameter(obj,key,value,kind)
+ if #report.parameters>=MAX_PARAMETERS then report.stats.parametersLimited=true; return end
+ local packed=pack(value)
+ if packed~=nil then table.insert(report.parameters,{path=pathOf(obj),key=clip(key,80),kind=kind,value=packed}) end
+end
+local function addScript(obj,context)
+ if not context then
+  if genericScripts>=12 then report.stats.scriptsLimited=true; return end
+  genericScripts+=1
+ end
+ if #report.scripts>=MAX_SCRIPTS then report.stats.scriptsLimited=true; return end
+ local entry={path=pathOf(obj),class=obj.ClassName,weaponContext=context==true,sourceStatus="not_attempted_limit"}
+ table.insert(report.scripts,entry)
+ if not context then entry.sourceStatus="unconfirmed_context"; return end
+ if sourceReadable==false then entry.sourceStatus="protected_or_unavailable"; return end
+ if sourceAttempts>=MAX_SOURCE_ATTEMPTS or sourceBytes>=MAX_SOURCE_BYTES then return end
+ sourceAttempts+=1
+ local ok,source=pcall(function() return obj.Source end)
+ if not ok or typeof(source)~="string" then
+  entry.sourceStatus="protected_or_unavailable"
+  if sourceReadable==nil then sourceReadable=false end
+  return
+ end
+ sourceReadable=true
+ if source=="" then entry.sourceStatus="empty_or_unavailable"; return end
+ local kept=clip(source,math.min(6000,MAX_SOURCE_BYTES-sourceBytes))
+ entry.source=kept; entry.sourceStatus="readable"; entry.sourceTruncated=#kept<#source
+ sourceBytes+=#kept
+end
+local function rememberMuzzle(obj)
+ if #muzzleRefs>=8 then return end
+ if not obj:IsA("Attachment") and not obj:IsA("BasePart") then return end
+ if not containsWord(obj.Name,{"muzzle","barrel","firepoint","shootpoint","gunpoint","bulletoffset","bulletorigin","guntip"}) then return end
+ table.insert(muzzleRefs,obj)
+end
+local function observeTool(tool)
+ if seenTools[tool] or #report.tools>=8 then return end
+ seenTools[tool]=true
+ local name=normalized(tool.Name)
+ if #name>=3 then weaponNames[name]=true end
+ local toolPath=pathOf(tool)
+ table.insert(report.tools,{path=toolPath,equipped=tool.Parent==player.Character})
+ enqueue(tool,true)
+ connect(tool.Activated,function()
+  if stopped or tool.Parent~=player.Character then return end
+  lastActivation=os.clock()
+  if #report.activations>=24 then return end
+  local camera=workspace.CurrentCamera
+  table.insert(report.activations,{at=number(lastActivation-started),weapon=toolPath,
+   cameraPosition=camera and vector(camera.CFrame.Position) or nil,
+   cameraLook=camera and vector(camera.CFrame.LookVector) or nil})
+ end)
+end
+local function discoverTools()
+ local character=player.Character
+ if character then
+  for i,obj in character:GetChildren() do
+   if i>80 then break end
+   if obj:IsA("Tool") then observeTool(obj)
+   elseif obj:IsA("Model") and weaponContext(obj.Name) then enqueue(obj,true) end
+  end
+ end
+ local backpack=player:FindFirstChildOfClass("Backpack")
+ if backpack then
+  for i,obj in backpack:GetChildren() do
+   if i>32 then break end
+   if obj:IsA("Tool") then observeTool(obj) end
+  end
+ end
+ local camera=workspace.CurrentCamera
+ if camera then
+  for i,obj in camera:GetChildren() do
+   if i>32 then break end
+   if obj:IsA("Model") or obj:IsA("Tool") then enqueue(obj,true) end
+  end
+ end
+end
+local function inspectNode(item)
+ local obj=item.object
+ if not obj.Parent or obj==script then return end
+ local context=item.context or obj:IsA("Tool") or weaponContext(obj.Name)
+ local remote=obj:IsA("RemoteEvent") or obj:IsA("UnreliableRemoteEvent") or obj:IsA("RemoteFunction")
+ local ownScript=playerScripts and obj:IsA("LuaSourceContainer") and obj:IsDescendantOf(playerScripts)
+ if context or remote or ownScript then
+  if obj:IsA("LuaSourceContainer") then addScript(obj,context) end
+  if remote then
+   if #report.remotes<MAX_REMOTES then table.insert(report.remotes,{path=pathOf(obj),class=obj.ClassName,weaponContext=context==true,role="unconfirmed"})
+   else report.stats.remotesLimited=true end
+  end
+  if context then
+   if #report.parameters<MAX_PARAMETERS then
+    for key,value in obj:GetAttributes() do
+     if containsWord(key,parameterWords) then addParameter(obj,key,value,"attribute") end
+    end
+    if obj:IsA("ValueBase") and not obj:IsA("ObjectValue") and containsWord(obj.Name,parameterWords) then
+     addParameter(obj,obj.Name,obj.Value,"value")
+    end
+   end
+   rememberMuzzle(obj)
+  end
+ end
+ local children=obj:GetChildren()
+ for i,child in children do
+  if i>256 then report.stats.queueLimited=true; break end
+  enqueue(child,context)
+ end
+end
+local function projectileSample(track,now)
+ local part=track.part
+ if not part:IsDescendantOf(workspace) then return false end
+ local position=part.Position
+ local elapsed=now-track.lastAt
+ local observed=elapsed>.0001 and (position-track.lastPosition)/elapsed or nil
+ table.insert(track.entry.samples,{at=number(now-started),position=vector(position),
+  physicsVelocity=vector(part.AssemblyLinearVelocity),observedVelocity=observed and vector(observed) or nil})
+ track.lastAt=now; track.lastPosition=position
+ return #track.entry.samples<12
+end
+local function observeProjectile(obj)
+ if stopped or #report.projectileCandidates>=8 or not obj:IsA("BasePart") or seenProjectiles[obj] then return end
+ if not obj:IsDescendantOf(workspace) then return end
+ local camera=workspace.CurrentCamera
+ if not camera then return end
+ local ancestor=obj
+ local named=false
+ for _=1,8 do
+  if not ancestor or ancestor==workspace then break end
+  if ancestor==player.Character or ancestor==camera then return end
+  if ancestor:IsA("Model") and ancestor:FindFirstChildOfClass("Humanoid") then return end
+  if containsWord(ancestor.Name,projectileWords) then named=true end
+  ancestor=ancestor.Parent
+ end
+ if not named then return end
+ local origin=camera.CFrame.Position
+ for _,ref in muzzleRefs do
+  if ref:IsDescendantOf(workspace) then origin=ref:IsA("Attachment") and ref.WorldPosition or ref.Position; break end
+ end
+ local distance=(obj.Position-origin).Magnitude
+ if distance>80 then return end
+ local now=os.clock()
+ local age=lastActivation and now-lastActivation or nil
+ local duringInput=Input:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) or (age and age<.6)
+ if not duringInput then return end
+ local entry={path=pathOf(obj),class=obj.ClassName,anchored=obj.Anchored,size=vector(obj.Size),
+  distanceFromObservedOrigin=number(distance),activationAge=age and number(age) or nil,
+  ownership="unconfirmed",samples={}}
+ seenProjectiles[obj]=true
+ table.insert(report.projectileCandidates,entry)
+ local track={part=obj,entry=entry,lastAt=now,lastPosition=obj.Position}
+ projectileSample(track,now)
+ table.insert(tracks,track)
+end
+local function captureMuzzles()
+ local camera=workspace.CurrentCamera
+ local character=player.Character
+ local root=character and character:FindFirstChild("HumanoidRootPart")
+ for _,obj in muzzleRefs do
+  if not obj:IsDescendantOf(workspace) then continue end
+  local cf=obj:IsA("Attachment") and obj.WorldCFrame or obj.CFrame
+  table.insert(report.muzzles,{path=pathOf(obj),world=frame(cf),
+   relativeToCamera=camera and frame(camera.CFrame:ToObjectSpace(cf)) or nil,
+   relativeToRoot=root and root:IsA("BasePart") and frame(root.CFrame:ToObjectSpace(cf)) or nil})
+ end
+end
+local function clearState()
+ table.clear(tracks); table.clear(queue); table.clear(seen); table.clear(seenTools)
+ table.clear(muzzleRefs); table.clear(seenProjectiles)
+end
+local function cancel()
+ if stopped then return end
+ stopped=true; disconnectAll(); clearState()
+end
+local function finish(reason)
+ if stopped then return end
+ stopped=true; disconnectAll()
+ local ok,result=pcall(function()
+ report.durationSeconds=number(os.clock()-started); report.stopReason=reason
+ captureMuzzles()
+ report.stats.sourceAttempts=sourceAttempts; report.stats.sourceBytes=sourceBytes
+ report.stats.sourceReadable=sourceReadable==true
+ report.stats.pendingNodes=math.max(0,#queue-queueIndex+1)
+ local json=Http:JSONEncode(report)
+ if #json>MAX_REPORT_BYTES then
+  report.reportTruncated=true
+  for _,entry in report.scripts do if entry.source then entry.source=nil; entry.sourceStatus="omitted_report_limit" end end
+  while #report.parameters>48 do table.remove(report.parameters) end
+  while #report.scripts>24 do table.remove(report.scripts) end
+  json=Http:JSONEncode(report)
+ end
+ if #json>MAX_REPORT_BYTES then
+  json=Http:JSONEncode({format=report.format,error="report_limit",durationSeconds=report.durationSeconds,
+   counts={scripts=#report.scripts,parameters=#report.parameters,remotes=#report.remotes,projectiles=#report.projectileCandidates},
+   notes={"Le rapport depasse la limite de taille meme apres reduction. Aucun envoi automatique."}})
+ end
+  return json
+ end)
+ if not ok then
+  result=Http:JSONEncode({format=report.format,error=clip(result,200),stopReason="report_error"}); reason="report_error"
+ end
+ clearState()
+ print("R1_WEAPON_INSPECTOR_BEGIN")
+ for i=1,#result,3000 do print(string.sub(result,i,i+2999)) end
+ print("R1_WEAPON_INSPECTOR_END")
+ onComplete(result,reason)
+end
+connect(Input.InputBegan,function(input,processed)
+ if stopped or processed or input.UserInputType~=Enum.UserInputType.MouseButton1 or #report.mousePresses>=24 then return end
+ table.insert(report.mousePresses,number(os.clock()-started))
+end)
+connect(workspace.DescendantAdded,observeProjectile)
+local discoverClock,sampleClock,uiClock=0,0,0
+local needsSetup=true
+connect(RunService.Heartbeat,function(dt)
+ if stopped then return end
+ local ok,failure=pcall(function()
+  if needsSetup then
+   discoverTools(); enqueue(playerScripts,false); enqueue(ReplicatedStorage,false); needsSetup=false
+  end
+  local deadline=os.clock()+.002
+  for _=1,32 do
+   if queueIndex>#queue or os.clock()>deadline then break end
+   local item=queue[queueIndex]; queueIndex+=1
+   inspectNode(item); report.stats.visited+=1
+  end
+  discoverClock+=dt; sampleClock+=dt; uiClock+=dt
+  if discoverClock>=1 then discoverClock=0; discoverTools() end
+  if sampleClock>=.1 then
+   sampleClock=0
+   local now=os.clock()
+   for i=#tracks,1,-1 do if not projectileSample(tracks[i],now) then table.remove(tracks,i) end end
+  end
+  if uiClock>=.25 then
+   uiClock=0
+   onProgress(math.max(0,DURATION-(os.clock()-started)),#report.scripts,#report.parameters,#report.projectileCandidates)
+  end
+ end)
+ if not ok then report.error=clip(failure,200); finish("observation_error")
+ elseif os.clock()-started>=DURATION then finish("completed") end
+end)
+return {cancel=cancel,finish=finish}
+end
+local weaponReportRun=nil
+local weaponReportGeneration=0
+do
+ local lastWeaponReport=nil
+ local page=pages.Rapport
+ page.BackgroundColor3=card; page.BackgroundTransparency=0; round(page)
+ local collect=make("TextButton",page,{Name="CollectWeaponReport",Position=UDim2.fromOffset(12,12),Size=UDim2.fromOffset(212,34),Text="Lancer la collecte (12 s)",BackgroundColor3=accent,TextColor3=white,TextSize=12,Font=Enum.Font.GothamBold,BorderSizePixel=0})
+ round(collect)
+ local choose=make("TextButton",page,{Name="SelectWeaponReport",Position=UDim2.new(1,-214,0,12),Size=UDim2.fromOffset(202,34),Text="Selectionner le rapport",BackgroundColor3=bg,TextColor3=accent,TextSize=12,Font=Enum.Font.GothamBold,BorderSizePixel=0,Visible=false})
+ round(choose)
+ local reportStatus=label(page,"Equipe ton arme, puis clique Lancer. Le menu se replie pendant 12 secondes et revient ici avec le rapport.",UDim2.fromOffset(12,56),UDim2.new(1,-24,0,50))
+ reportStatus.TextSize=12; reportStatus.TextWrapped=true; reportStatus.TextYAlignment=Enum.TextYAlignment.Top
+ local scroll=make("ScrollingFrame",page,{Name="WeaponReportScroll",Position=UDim2.fromOffset(12,112),Size=UDim2.new(1,-24,1,-124),BackgroundColor3=bg,BorderSizePixel=0,ScrollBarThickness=4,ScrollBarImageColor3=accent,CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,Visible=false})
+ round(scroll)
+ local reportBox=make("TextBox",scroll,{Name="WeaponReportText",Position=UDim2.fromOffset(8,8),Size=UDim2.new(1,-20,0,0),AutomaticSize=Enum.AutomaticSize.Y,BackgroundTransparency=1,MultiLine=true,ClearTextOnFocus=false,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Font=Enum.Font.Code,TextSize=12,TextColor3=white,Text=""})
+ connect(choose.Activated,function()
+  if not lastWeaponReport then return end
+  reportBox.Text=lastWeaponReport
+  reportBox:CaptureFocus(); reportBox.CursorPosition=#reportBox.Text+1; reportBox.SelectionStart=1
+  reportStatus.Text="Rapport selectionne : Ctrl+C pour copier, puis colle-le dans le chat."
+ end)
+ connect(collect.Activated,function()
+  if weaponReportRun then weaponReportRun.finish("manual"); return end
+  weaponReportGeneration+=1
+  local generation=weaponReportGeneration
+  reportBox:ReleaseFocus(); choose.Visible=false; scroll.Visible=false
+  reportStatus.Text="Collecte en cours : equipe ton arme, vise et tire."
+  collect.Text="Terminer maintenant"
+  panel.Visible=false; menu.Text="RAPPORT / 12 s"
+  weaponReportRun=startWeaponReport(function(remaining,scripts,parameters,projectiles)
+   if stopped or generation~=weaponReportGeneration then return end
+   reportStatus.Text=string.format("Encore %.0f s | %d scripts, %d parametres, %d projectiles candidats",remaining,scripts,parameters,projectiles)
+   menu.Text=string.format("RAPPORT / %.0f s",remaining)
+  end,function(json,reason)
+   if stopped or generation~=weaponReportGeneration then return end
+   weaponReportRun=nil; lastWeaponReport=json
+   reportBox.Text=json; scroll.Visible=true; scroll.CanvasPosition=Vector2.zero
+   collect.Text="Relancer la collecte (12 s)"; choose.Visible=true
+   local summary=reason=="completed" and "Rapport pret." or (reason=="manual" and "Rapport partiel : mesure arretee." or "Rapport avec erreur.")
+   reportStatus.Text=summary.." Clique Selectionner, puis Ctrl+C et colle-le dans le chat. Les sources protegees restent inaccessibles."
+   menu.Text="R1 / MENU"; panel.Visible=true; selectTab("Rapport")
+  end)
+ end)
+ local shortcut=make("TextButton",columns.Reglages.left,{Size=UDim2.new(1,0,0,38),Text="Ouvrir le rapport de l arme",BackgroundColor3=rowColor,TextColor3=accent,TextSize=11,Font=Enum.Font.GothamBold,BorderSizePixel=0})
+ round(shortcut); connect(shortcut.Activated,function() panel.Visible=true; selectTab("Rapport") end)
+end
+selectTab("Rapport")
 -- Registre 10 Hz, recherche de cible 12,5 Hz, squelette 20 Hz.
 -- La cible verrouillee et la camera sont suivies a chaque image.
 local SCAN_INTERVAL, AIM_INTERVAL = 0.1, 0.08
@@ -776,7 +1173,9 @@ RunService:BindToRenderStep(binding,Enum.RenderPriority.Camera.Value+1,function(
 end)
 local function cleanup()
  if stopped then return end
- stopped=true; releaseCamera(); RunService:UnbindFromRenderStep(binding)
+ stopped=true; weaponReportGeneration+=1
+ if weaponReportRun then weaponReportRun.cancel(); weaponReportRun=nil end
+ releaseCamera(); RunService:UnbindFromRenderStep(binding)
  RunService:UnbindFromRenderStep(binding.."_Prepare")
  for _,c in connections do c:Disconnect() end
  for model in records do remove(model) end
