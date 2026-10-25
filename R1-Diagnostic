@@ -1,0 +1,191 @@
+-- R1-Diagnostic : LocalScript en lecture seule des donnees de jeu.
+-- Equipe ton arme puis vise et tire pendant les 10 secondes de mesure.
+-- Le rapport apparait dans une fenetre copiable et dans la console F9.
+-- Aucun acces memoire natif : offsets spatiaux et parametres repliques uniquement.
+local Players=game:GetService("Players")
+local Input=game:GetService("UserInputService")
+local Http=game:GetService("HttpService")
+local player=Players.LocalPlayer
+if not player then error("Lancer ce diagnostic sur le client.") end
+local connections,muzzleRefs,seen={},{},{}
+local cancelled=false
+local started=os.clock()
+local report={format="R1-DIAGNOSTIC-1",placeId=game.PlaceId,gravity=workspace.Gravity,
+ weapons={},samples={},toolActivationTimes={},notes={
+ "Les offsets sont des positions et orientations relatives, pas des adresses memoire.",
+ "Les sorties de canon sont des candidats identifies par leur nom.",
+ "Une activation de Tool ne prouve pas qu'un tir a ete accepte par le serveur.",
+ "Les parametres non repliques et le code serveur ne sont pas accessibles ici.",
+ }}
+local function connect(signal,callback)
+ local c=signal:Connect(callback); table.insert(connections,c); return c
+end
+local function number(n)
+ if n~=n or n==math.huge or n==-math.huge then return tostring(n) end
+ return math.round(n*10000)/10000
+end
+local function vector(v) return {number(v.X),number(v.Y),number(v.Z)} end
+local function frame(cf)
+ local values={cf:GetComponents()}
+ for i,v in values do values[i]=number(v) end
+ return values
+end
+local function pack(value)
+ local kind=typeof(value)
+ if kind=="number" then return number(value)
+ elseif kind=="boolean" then return value
+ elseif kind=="string" then return string.sub(value,1,120)
+ elseif kind=="Vector3" then return vector(value)
+ elseif kind=="CFrame" then return frame(value)
+ elseif kind=="EnumItem" then return tostring(value) end
+ return nil
+end
+local function normalized(name) return string.lower(name):gsub("[^%w]","") end
+local parameterWords={"bullet","projectile","muzzle","gravity","drop","range","spread","recoil","firerate","fireinterval","ammo","damage","velocity","speed"}
+local function isParameter(name)
+ local key=normalized(name)
+ for _,word in parameterWords do if string.find(key,word,1,true) then return true end end
+ return false
+end
+local function isMuzzle(obj)
+ if not obj:IsA("Attachment") and not obj:IsA("BasePart") then return false end
+ local key=normalized(obj.Name)
+ for _,word in {"muzzle","barrel","firepoint","shootpoint","gunpoint","bulletoffset","bulletorigin","guntip"} do
+  if string.find(key,word,1,true) then return true end
+ end
+ return false
+end
+local function relativePath(obj,root)
+ local names={}
+ while obj and obj~=root do table.insert(names,1,string.sub(obj.Name,1,80)); obj=obj.Parent end
+ return table.concat(names,"/")
+end
+local function inspectWeapon(root)
+ if seen[root] or #report.weapons>=6 then return end
+ seen[root]=true
+ local entry={name=string.sub(root.Name,1,80),class=root.ClassName,parameters={},muzzleCandidates={},visited=0,truncated=false}
+ table.insert(report.weapons,entry)
+ local queue={root}
+ local index=1
+ while index<=#queue and index<=256 do
+  local obj=queue[index]; index+=1; entry.visited+=1
+  local path=relativePath(obj,root)
+  if #entry.parameters<40 then
+   for key,value in obj:GetAttributes() do
+    if #entry.parameters>=40 then break end
+    if isParameter(key) then
+     local packed=pack(value)
+     if packed~=nil then table.insert(entry.parameters,{path=path,attribute=key,value=packed}) end
+    end
+   end
+  end
+  if #entry.parameters<40 and obj:IsA("ValueBase") and not obj:IsA("ObjectValue") and isParameter(obj.Name) then
+   local packed=pack(obj.Value)
+   if packed~=nil then table.insert(entry.parameters,{path=path,value=packed}) end
+  end
+  if isMuzzle(obj) and #entry.muzzleCandidates<8 then
+   table.insert(entry.muzzleCandidates,{path=path,class=obj.ClassName})
+   if #muzzleRefs<8 then table.insert(muzzleRefs,{object=obj,weapon=entry.name,path=path}) end
+  end
+  for _,child in obj:GetChildren() do
+   if #queue<256 then table.insert(queue,child) else entry.truncated=true end
+  end
+ end
+ if root:IsA("Tool") then
+  connect(root.Activated,function()
+   if #report.toolActivationTimes<16 then table.insert(report.toolActivationTimes,number(os.clock()-started)) end
+  end)
+ end
+end
+local function discover()
+ local character=player.Character
+ if character then
+  for _,obj in character:GetChildren() do
+   if obj:IsA("Tool") then inspectWeapon(obj)
+   elseif obj:IsA("Model") then
+    local name=normalized(obj.Name)
+    if string.find(name,"weapon",1,true) or string.find(name,"gun",1,true) or string.find(name,"viewmodel",1,true) then inspectWeapon(obj) end
+   end
+  end
+ end
+ local camera=workspace.CurrentCamera
+ if camera then
+  for _,obj in camera:GetChildren() do
+   if obj:IsA("Model") or obj:IsA("Tool") then inspectWeapon(obj) end
+  end
+ end
+end
+local function candidate(camera,character)
+ local pg=player:FindFirstChildOfClass("PlayerGui")
+ local gui=pg and pg:FindFirstChild("StudioAimPanel")
+ if not gui then return nil end
+ local best,bestScore=nil,math.huge
+ for _,obj in gui:GetChildren() do
+  if obj:IsA("Highlight") and obj.Enabled then
+   local model=obj.Adornee
+   if model and model:IsA("Model") and model~=character then
+    local head=model:FindFirstChild("Head")
+    local root=model:FindFirstChild("HumanoidRootPart")
+    if head and head:IsA("BasePart") then
+     local p,onScreen=camera:WorldToViewportPoint(head.Position)
+     local score=(Vector2.new(p.X,p.Y)-camera.ViewportSize/2).Magnitude
+     if onScreen and p.Z>0 and score<bestScore then
+      bestScore=score
+      best={source="ESP nearest to crosshair, not guaranteed locked target",head=vector(head.Position),screenOffsetPixels=number(score),distance=number((head.Position-camera.CFrame.Position).Magnitude),velocity=root and root:IsA("BasePart") and vector(root.AssemblyLinearVelocity) or nil}
+     end
+    end
+   end
+  end
+ end
+ return best
+end
+local function snapshot()
+ local camera=workspace.CurrentCamera
+ local character=player.Character
+ if not camera or not character then return {time=number(os.clock()-started),state="Camera ou personnage absent"} end
+ local root=character:FindFirstChild("HumanoidRootPart")
+ local head=character:FindFirstChild("Head")
+ local humanoid=character:FindFirstChildOfClass("Humanoid")
+ local sample={time=number(os.clock()-started),cameraType=tostring(camera.CameraType),camera=frame(camera.CFrame),focus=frame(camera.Focus),fov=number(camera.FieldOfView),viewport={camera.ViewportSize.X,camera.ViewportSize.Y},leftMouse=Input:IsMouseButtonPressed(Enum.UserInputType.MouseButton1),rightMouse=Input:IsMouseButtonPressed(Enum.UserInputType.MouseButton2),muzzles={}}
+ if humanoid then sample.autoRotate=humanoid.AutoRotate; sample.moveDirection=vector(humanoid.MoveDirection) end
+ if root and root:IsA("BasePart") then sample.cameraRelativeToRoot=frame(root.CFrame:ToObjectSpace(camera.CFrame)); sample.rootVelocity=vector(root.AssemblyLinearVelocity) end
+ if head and head:IsA("BasePart") then sample.cameraDistanceToHead=number((camera.CFrame.Position-head.Position).Magnitude) end
+ for _,ref in muzzleRefs do
+  local obj=ref.object
+  if obj:IsDescendantOf(workspace) then
+   local cf=obj:IsA("Attachment") and obj.WorldCFrame or obj.CFrame
+   table.insert(sample.muzzles,{weapon=ref.weapon,path=ref.path,world=frame(cf),relativeToCamera=frame(camera.CFrame:ToObjectSpace(cf)),relativeToRoot=root and root:IsA("BasePart") and frame(root.CFrame:ToObjectSpace(cf)) or nil})
+  end
+ end
+ sample.nearestEspCandidate=candidate(camera,character)
+ return sample
+end
+if script and typeof(script)=="Instance" then connect(script.Destroying,function() cancelled=true end) end
+print("R1 diagnostic : equipe ton arme, puis vise et tire pendant 10 secondes.")
+discover()
+task.wait(2)
+local ok,failure=pcall(function()
+ for _=1,8 do
+  if cancelled then return end
+  discover(); table.insert(report.samples,snapshot()); task.wait(1)
+ end
+end)
+for _,c in connections do c:Disconnect() end
+if cancelled then return end
+if not ok then report.error=tostring(failure) end
+report.durationSeconds=number(os.clock()-started)
+local json=Http:JSONEncode(report)
+print("R1_DIAGNOSTIC_BEGIN")
+for i=1,#json,3000 do print(string.sub(json,i,i+2999)) end
+print("R1_DIAGNOSTIC_END")
+-- Fenetre locale : selectionner le texte, Ctrl+A puis Ctrl+C pour copier le rapport.
+local pg=player:WaitForChild("PlayerGui")
+local old=pg:FindFirstChild("R1DiagnosticReport"); if old then old:Destroy() end
+local gui=Instance.new("ScreenGui"); gui.Name="R1DiagnosticReport"; gui.ResetOnSpawn=false; gui.DisplayOrder=1000
+local panel=Instance.new("Frame"); panel.AnchorPoint=Vector2.new(.5,.5); panel.Position=UDim2.fromScale(.5,.5); panel.Size=UDim2.fromScale(.8,.75); panel.BackgroundColor3=Color3.fromRGB(22,22,27); panel.Parent=gui
+local title=Instance.new("TextLabel"); title.Size=UDim2.new(1,-48,0,44); title.Position=UDim2.fromOffset(12,0); title.BackgroundTransparency=1; title.Text="R1 / Rapport pret - clique le texte, Ctrl+A puis Ctrl+C"; title.TextColor3=Color3.new(1,1,1); title.TextSize=13; title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=panel
+local close=Instance.new("TextButton"); close.Position=UDim2.new(1,-36,0,8); close.Size=UDim2.fromOffset(28,28); close.Text="X"; close.Parent=panel
+local scroll=Instance.new("ScrollingFrame"); scroll.Position=UDim2.fromOffset(12,48); scroll.Size=UDim2.new(1,-24,1,-60); scroll.BackgroundColor3=Color3.fromRGB(30,30,36); scroll.BorderSizePixel=0; scroll.ScrollBarThickness=4; scroll.AutomaticCanvasSize=Enum.AutomaticSize.Y; scroll.CanvasSize=UDim2.new(); scroll.Parent=panel
+local box=Instance.new("TextBox"); box.Name="Report"; box.Size=UDim2.new(1,-12,0,0); box.Position=UDim2.fromOffset(6,6); box.AutomaticSize=Enum.AutomaticSize.Y; box.BackgroundTransparency=1; box.MultiLine=true; box.ClearTextOnFocus=false; box.TextWrapped=true; box.TextXAlignment=Enum.TextXAlignment.Left; box.TextYAlignment=Enum.TextYAlignment.Top; box.Font=Enum.Font.Code; box.TextSize=12; box.TextColor3=Color3.fromRGB(230,230,240); box.Text=json; box.Parent=scroll
+close.Activated:Connect(function() gui:Destroy() end)
+gui.Parent=pg
